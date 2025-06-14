@@ -43,13 +43,13 @@ def add_zscore_layers(sp_adata, top_fraction=0.1):
 
     sp_adata.layers["zscore_by_celltype"] = zero_matrix.copy()
     sp_adata.layers["zscore_all_celltype"] = zero_matrix.copy()
-
+    sp_adata.X = sp_adata.X.tocsr()
     if scipy.sparse.issparse(sp_adata.X):
         sp_adata.X = sp_adata.X.toarray()
     # celltypeごとの zscore（make_positive_values の後で std で割る）
     for ct in sp_adata.obs["celltype"].unique():
         idx = sp_adata.obs["celltype"] == ct
-        X_sub = sp_adata.X[idx]
+        X_sub = sp_adata.X[idx,:]
 
         mean = X_sub.mean(axis=0)
         std = np.array([
