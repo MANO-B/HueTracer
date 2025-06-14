@@ -7,6 +7,8 @@ setup(
     author='Masachika Ikegami',
     author_email='ikegamitky@gmail.com',
     url='https://github.com/MANO-B/HueTracer',
+    package_dir={'': 'src'},  # ★ポイント：srcからパッケージを探す
+    packages=find_packages(where='src'),
     packages=find_packages(),
     install_requires=[
         'numpy',
