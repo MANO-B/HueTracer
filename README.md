@@ -8,4 +8,4 @@ pip install huetracer
 ```
 
 ## Usage
-You need to prepare Visium HD spatial transcriptome data generated with SpaceRanger program by 10X. You can see the usage in [IPython Notebook](tutorial/huetracer_tutorial.ipynb).
+You need to prepare Visium HD spatial transcriptome data generated with SpaceRanger program by 10X. You can see the usage in [nucleus segmentation tutorial](tutorial/nucleus_segmentation_tutorial.ipynb).
