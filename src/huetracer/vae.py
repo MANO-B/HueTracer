@@ -149,7 +149,7 @@ class SpatialMicroenvironmentAnalyzer:
         
         # データローダー準備
         cpu_count = multiprocessing.cpu_count()
-        num_workers = min(8, cpu_count // os.cpu_count() if os.cpu_count() else 1)
+        num_workers = min(cpu_count - 1, cpu_count // os.cpu_count() if os.cpu_count() else 1)
         dataset = TensorDataset(torch.FloatTensor(self.microenv_data))
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, multiprocessing_context="fork")
         
