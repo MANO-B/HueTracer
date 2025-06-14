@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import scipy.sparse
+import scipy
 import scanpy as sc
 
 
@@ -44,12 +44,12 @@ def add_zscore_layers(sp_adata, top_fraction=0.1):
     sp_adata.layers["zscore_by_celltype"] = zero_matrix.copy()
     sp_adata.layers["zscore_all_celltype"] = zero_matrix.copy()
 
+    if scipy.sparse.issparse(sp_adata.X):
+        sp_adata.X = sp_adata.X.toarray()
     # celltypeごとの zscore（make_positive_values の後で std で割る）
     for ct in sp_adata.obs["celltype"].unique():
         idx = sp_adata.obs["celltype"] == ct
         X_sub = sp_adata.X[idx]
-        if sparse.issparse(X_sub):
-            X_sub = X_sub.toarray()
 
         mean = X_sub.mean(axis=0)
         std = np.array([
@@ -63,9 +63,6 @@ def add_zscore_layers(sp_adata, top_fraction=0.1):
 
     # 全体の zscore（z は定義済みの X をそのまま）
     X = sp_adata.X
-    if sparse.issparse(X):
-        X = X.toarray()
-
     mean = X.mean(axis=0)
     std = np.array([
         np.std(gene_expr[gene_expr != 0]) if np.any(gene_expr != 0) else 0
@@ -85,6 +82,8 @@ def prepare_microenv_data(sp_adata_raw, sp_adata_microenvironment, lt_df_raw, mi
     # 共通細胞の抽出
     common_cells = sp_adata_microenvironment.obs_names.intersection(sp_adata_raw.obs_names)
     sp_adata = sp_adata_raw[common_cells].copy()
+    if scipy.sparse.issparse(sp_adata.X):
+        sp_adata.X = sp_adata.X.toarray()
 
     # ノーマライズ：bin_countで割る（整数カウント前提）
     sp_adata.X = np.round(sp_adata.X).copy() / sp_adata.obs['bin_count'].values[:, None]
