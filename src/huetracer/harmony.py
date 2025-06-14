@@ -125,6 +125,7 @@ class Harmony(object):
         self.objective_kmeans_entropy = []
         self.objective_kmeans_cross   = []
         self.kmeans_rounds  = []
+        self.random_state = random_state
 
         self.allocate_buffers()
         if cluster_fn == 'kmeans':
@@ -265,7 +266,7 @@ class Harmony(object):
         self._scale_dist = np.exp(self._scale_dist)
         # Update cells in blocks
         update_order = np.arange(self.N)
-        np.random.default_rng(SEED).shuffle(update_order)
+        np.random.default_rng(self.random_state).shuffle(update_order)
         n_blocks = np.ceil(1 / self.block_size).astype(int)
         blocks = np.array_split(update_order, n_blocks)
         for b in blocks:
