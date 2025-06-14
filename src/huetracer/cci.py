@@ -3,6 +3,8 @@ import numpy as np
 import scipy
 import scanpy as sc
 import scipy.sparse as sparse
+from sklearn.neighbors import NearestNeighbors
+from tqdm import tqdm
 
 def make_coexp_cc_df(ligand_adata, edge_df, role):
     sender = edge_df.cell1 if role == "sender" else edge_df.cell2
@@ -158,3 +160,71 @@ def prepare_microenv_data(sp_adata_raw, sp_adata_microenvironment, lt_df_raw, mi
     lt_df = lt_df.div(lt_df.sum(axis=0), axis=1)
 
     return sp_adata, lt_df
+
+
+def construct_microenvironment_data(sp_adata, cluster_cells, ligands, expr_up_by_ligands, neighbor_cell_numbers=19):
+    # 1. 全細胞のクラスタ・タイプ情報
+    all_cell_to_cluster = {
+        i: sp_adata.obs['cluster'].iloc[i] if 'cluster' in sp_adata.obs.columns else 'unknown'
+        for i in range(len(sp_adata))
+    }
+    all_cell_to_celltype = {
+        i: sp_adata.obs['celltype'].iloc[i] if 'celltype' in sp_adata.obs.columns else 'unknown'
+        for i in range(len(sp_adata))
+    }
+
+    # 2. 近傍関係構築
+    coords = cluster_cells.obs[["array_row", "array_col"]].values
+    nbrs = NearestNeighbors(n_neighbors=neighbor_cell_numbers, algorithm='ball_tree').fit(coords)
+    distances, indices = nbrs.kneighbors(coords)
+
+    # 3. 発現データ取得（z-scoreと通常発現）
+    exp_data = cluster_cells.layers["zscore_all_celltype"].toarray()
+    exp_data_zscore = expr_up_by_ligands
+
+    n_cells, n_genes = cluster_cells.shape
+    microenv_data = np.zeros((n_cells, exp_data.shape[1]))
+    microenv_data_zscore = np.zeros((n_cells, exp_data_zscore.shape[1]))
+
+    print("Microenvironment data construction...")
+    for i in tqdm(range(n_cells)):
+        neighbor_indices = indices[i]
+        microenv_data[i] = np.sum(exp_data[neighbor_indices], axis=0)
+        microenv_data_zscore[i] = np.sum(exp_data_zscore[neighbor_indices], axis=0)
+
+    # 4. 対象遺伝子の抽出（リガンド）
+    gene_list = cluster_cells.var_names.tolist()
+    ligand_indices = [gene_list.index(gene) for gene in ligands]
+    microenv_adata_ligands = microenv_data[:, ligand_indices]
+    exp_data_ligands = exp_data[:, ligand_indices]
+
+    # 5. 中心細胞のadata（リガンドのみ）
+    center_adata = cluster_cells[:, ligands]
+    center_adata.layers["expr_up"] = expr_up_by_ligands
+
+    # 6. エッジ（近傍細胞関係）情報作成
+    edge_pairs = []
+    for i in range(indices.shape[0]):
+        center = indices[i, 0]
+        for neighbor in indices[i]:
+            edge_pairs.append((center, neighbor))
+    edge_idx = np.arange(len(edge_pairs))
+
+    idx_to_name = {i: name for i, name in enumerate(center_adata.obs_names)}
+
+    edge_df = pd.DataFrame({
+        'edge': edge_idx,
+        'cell1': [idx_to_name.get(pair[0], f'unknown_{pair[0]}') for pair in edge_pairs],
+        'cell2': [idx_to_name.get(pair[1], f'unknown_{pair[1]}') for pair in edge_pairs],
+        'cell1_type': [all_cell_to_celltype.get(pair[0], 'unknown') for pair in edge_pairs],
+        'cell2_type': [all_cell_to_celltype.get(pair[1], 'unknown') for pair in edge_pairs],
+        'cell1_cluster': [all_cell_to_cluster.get(pair[0], 'unknown') for pair in edge_pairs],
+        'cell2_cluster': [all_cell_to_cluster.get(pair[1], 'unknown') for pair in edge_pairs]
+    }, index=edge_idx)
+
+    # cluster_cellsに含まれる細胞のみを対象に
+    valid_cells = set(cluster_cells.obs_names)
+    edge_df = edge_df[edge_df["cell1"].isin(valid_cells)].copy()
+
+    # 結果を返す
+    return edge_df, center_adata, exp_data_ligands
