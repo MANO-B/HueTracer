@@ -1,5 +1,9 @@
 from scipy import stats
 from scipy.stats import beta, binom
+from statsmodels.stats.multitest import multipletests
+import pandas as pd
+import numpy as np
+
 
 def beta_binomial_test_vs_population(success, trials, population_df, alpha=0.05, up_rate = 0.25):
     """
@@ -64,3 +68,99 @@ def wilson_score_interval(success, trials, alpha=0.05):
     half_width = z * np.sqrt((p * (1 - p) / trials) + (z**2 / (4 * trials**2))) / denominator
     
     return max(0, centre - half_width), min(1, centre + half_width)
+
+def calculate_coexpression_coactivity(edge_df, center_adata, exp_data, expr_up_by_ligands, role="sender"):
+    # Xとexpr_upを更新するコピーを作成
+    center_adata.X = exp_data
+    center_adata_receiver = center_adata.copy()
+    center_adata_receiver.X = expr_up_by_ligands
+    center_adata_receiver.layers['expr_up'] = center_adata_receiver.X.copy()
+
+    # 送信者と受信者のID
+    sender = edge_df.cell1 if role == "sender" else edge_df.cell2
+    receiver = edge_df.cell2 if role == "sender" else edge_df.cell1
+
+    # 共発現を計算
+    coexp_cc_df = pd.DataFrame(
+        center_adata[sender].X.toarray() * center_adata_receiver[receiver].X.toarray(),
+        columns=center_adata.var_names,
+        index=edge_df.index
+    )
+    coexp_cc_df['cell2_type'] = edge_df['cell2_type']
+    coexp_cc_df['cell1_type'] = edge_df['cell1_type']
+
+    # sender 側の発現行列
+    coexp_cc_df_sender = coexp_cc_df.copy()
+    coexp_cc_df_sender.iloc[:, :-2] = center_adata[sender].X.toarray()
+
+    # リガンド列の抽出
+    ligand_cols = [col for col in coexp_cc_df.columns if col not in ['cell1_type', 'cell2_type']]
+
+    # 各細胞ペアごとのカウント
+    sender_pos_count = (
+        coexp_cc_df_sender.groupby(['cell2_type', 'cell1_type'])[ligand_cols]
+        .sum().reset_index()
+        .rename(columns={lig: lig + '_sender_pos' for lig in ligand_cols})
+    )
+    inter_pos_count = (
+        coexp_cc_df.groupby(['cell2_type', 'cell1_type'])[ligand_cols]
+        .sum().reset_index()
+        .rename(columns={lig: lig + '_inter_pos' for lig in ligand_cols})
+    )
+
+    # long形式に変換
+    sender_long = sender_pos_count.melt(id_vars=['cell1_type', 'cell2_type'], 
+                                        var_name='ligand', value_name='sender_positive')
+    sender_long['ligand'] = sender_long['ligand'].str.replace('_sender_pos', '', regex=False)
+
+    inter_long = inter_pos_count.melt(id_vars=['cell1_type', 'cell2_type'], 
+                                      var_name='ligand', value_name='interaction_positive')
+    inter_long['ligand'] = inter_long['ligand'].str.replace('_inter_pos', '', regex=False)
+
+    # 結合
+    coexp_cc_df = sender_long.merge(inter_long, on=['cell1_type', 'cell2_type', 'ligand'], how='left')
+
+    # 1陽性細胞あたりの共発現
+    coexp_cc_df['coactivity_per_sender_cell_expr_ligand'] = (
+        coexp_cc_df['interaction_positive'] / coexp_cc_df['sender_positive']
+    )
+    coexp_cc_df.loc[coexp_cc_df['sender_positive'] == 0, 'coactivity_per_sender_cell_expr_ligand'] = 0
+
+    # 検定実行
+    results = []
+    for _, row in coexp_cc_df.iterrows():
+        success = row['interaction_positive']
+        trials = row['sender_positive']
+
+        p_val, ci_low_beta, ci_high_beta, is_sig, pop_mean = beta_binomial_test_vs_population(
+            success, trials, coexp_cc_df, alpha=0.05
+        )
+        ci_low_wilson, ci_high_wilson = wilson_score_interval(success, trials, alpha=0.05)
+
+        ci_width_beta = ci_high_beta - ci_low_beta if not np.isnan(ci_high_beta) else np.nan
+        ci_width_wilson = ci_high_wilson - ci_low_wilson
+
+        results.append({
+            'p_value': p_val,
+            'ci_lower_beta': ci_low_beta,
+            'ci_upper_beta': ci_high_beta,
+            'ci_lower_wilson': ci_low_wilson,
+            'ci_upper_wilson': ci_high_wilson,
+            'ci_width_beta': ci_width_beta,
+            'ci_width_wilson': ci_width_wilson,
+            'is_significant': is_sig,
+            'population_mean_rate': pop_mean
+        })
+
+    results_df = pd.DataFrame(results)
+    coexp_cc_df = pd.concat([coexp_cc_df, results_df], axis=1)
+
+    # 多重検定補正（Bonferroni）
+    valid_pvals = coexp_cc_df['p_value'].dropna()
+    if len(valid_pvals) > 0:
+        corrected_pvals = multipletests(valid_pvals, method='bonferroni')[1]
+        coexp_cc_df['p_value_bonferroni'] = np.nan
+        coexp_cc_df.loc[coexp_cc_df['p_value'].notna(), 'p_value_bonferroni'] = corrected_pvals
+        coexp_cc_df['is_significant_bonferroni'] = coexp_cc_df['p_value_bonferroni'] < 0.05
+
+    return coexp_cc_df
