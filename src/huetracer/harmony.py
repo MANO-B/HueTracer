@@ -3,9 +3,7 @@ import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.mixture import GaussianMixture
-
-
-
+from functools import partial
 
 def run_harmony(
     data_mat: np.ndarray,
