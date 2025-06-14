@@ -11,6 +11,7 @@ from torch.nn import Linear, ReLU, Sequential
 from torch.utils.data import TensorDataset, Dataset, DataLoader
 from sklearn.neighbors import NearestNeighbors
 from sklearn.impute import SimpleImputer
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # 時間をHH:MM:SSまたはMM:SS形式でフォーマットするヘルパー関数
