@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import scipy
 import scanpy as sc
-
+import scipy.sparse as sparse
 
 def make_coexp_cc_df(ligand_adata, edge_df, role):
     sender = edge_df.cell1 if role == "sender" else edge_df.cell2
@@ -36,50 +36,52 @@ def safe_toarray(x):
     else:
         return x
 
-def add_zscore_layers(sp_adata, top_fraction=0.1):
-    # 密なゼロ行列を準備
+# データの形状を取得
     shape = sp_adata.shape
-    zero_matrix = np.zeros(shape)
-
-    sp_adata.layers["zscore_by_celltype"] = zero_matrix.copy()
-    sp_adata.layers["zscore_all_celltype"] = zero_matrix.copy()
-
-    # celltypeごとの zscore（make_positive_values の後で std で割る）
+    
+    # X の密な配列を取得
+    if sparse.issparse(sp_adata.X):
+        X_dense = sp_adata.X.toarray()
+    else:
+        X_dense = sp_adata.X.copy()
+    
+    # 結果用のゼロ行列を準備
+    sp_adata.layers["zscore_by_celltype"] = np.zeros_like(X_dense)
+    sp_adata.layers["zscore_all_celltype"] = np.zeros_like(X_dense)
+    
+    # celltypeごとのz-score計算
     for ct in sp_adata.obs["celltype"].unique():
         idx = sp_adata.obs["celltype"] == ct
-        X_sub = sp_adata.X[idx]
-        if sparse.issparse(X_sub):
-            X_sub = X_sub.toarray()
-
+        X_sub = X_dense[idx]
+        
+        # 平均と標準偏差を計算
         mean = X_sub.mean(axis=0)
         std = np.array([
-            np.std(gene_expr[gene_expr != 0]) if np.any(gene_expr != 0) else 0
+            np.std(gene_expr[gene_expr != 0]) if np.any(gene_expr != 0) else 1
             for gene_expr in X_sub.T
         ])
-        std[std == 0] = 1
-
-        z = X_sub - mean
+        std[std == 0] = 1  # ゼロ除算を防ぐ
+        
+        # z-scoreを計算
+        z = (X_sub - mean) / std
+        
+        # 正の値に変換してレイヤーに格納
         sp_adata.layers["zscore_by_celltype"][idx] = make_positive_values(z)
-
-    # 全体の zscore（z は定義済みの X をそのまま）
-    X = sp_adata.X
-    if sparse.issparse(X):
-        X = X.toarray()
-
-    mean = X.mean(axis=0)
-    std = np.array([
-        np.std(gene_expr[gene_expr != 0]) if np.any(gene_expr != 0) else 0
-        for gene_expr in X.T
+    
+    # 全体のz-score計算
+    mean_all = X_dense.mean(axis=0)
+    std_all = np.array([
+        np.std(gene_expr[gene_expr != 0]) if np.any(gene_expr != 0) else 1
+        for gene_expr in X_dense.T
     ])
-    std[std == 0] = 1
-
-    z = X - mean
-    zscore_all = make_positive_values(z)
+    std_all[std_all == 0] = 1  # ゼロ除算を防ぐ
+    
+    z_all = (X_dense - mean_all) / std_all
+    zscore_all = make_positive_values(z_all)
     zscore_all = make_top_values(zscore_all, axis=0, top_fraction=top_fraction)
+    
     sp_adata.layers["zscore_all_celltype"] = zscore_all
 
-    # zscore_by_celltype に std を適用（遅延適用して正規化）
-    sp_adata.layers["zscore_by_celltype"] = sp_adata.layers["zscore_by_celltype"] / std
 
 def prepare_microenv_data(sp_adata_raw, sp_adata_microenvironment, lt_df_raw, min_frac=0.001, n_top_genes=2000):
     # 共通細胞の抽出
