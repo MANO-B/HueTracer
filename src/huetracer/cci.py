@@ -36,7 +36,18 @@ def safe_toarray(x):
     else:
         return x
 
-# データの形状を取得
+def add_zscore_layers(sp_adata, top_fraction=0.1):
+    """
+    AnnDataオブジェクトにz-scoreレイヤーを追加する関数
+    
+    Parameters:
+    -----------
+    sp_adata : AnnData
+        単一細胞データのAnnDataオブジェクト
+    top_fraction : float
+        上位何割の遺伝子を保持するか (デフォルト: 0.1)
+    """
+    # データの形状を取得
     shape = sp_adata.shape
     
     # X の密な配列を取得
