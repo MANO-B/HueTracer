@@ -88,7 +88,7 @@ def calculate_coexpression_coactivity(edge_df, center_adata, exp_data, expr_up_b
     )
     coexp_cc_df['cell2_type'] = edge_df['cell2_type']
     coexp_cc_df['cell1_type'] = edge_df['cell1_type']
-
+    bargraph_df = coexp_cc_df.copy()
     # sender 側の発現行列
     coexp_cc_df_sender = coexp_cc_df.copy()
     coexp_cc_df_sender.iloc[:, :-2] = center_adata[sender].X.toarray()
@@ -163,4 +163,4 @@ def calculate_coexpression_coactivity(edge_df, center_adata, exp_data, expr_up_b
         coexp_cc_df.loc[coexp_cc_df['p_value'].notna(), 'p_value_bonferroni'] = corrected_pvals
         coexp_cc_df['is_significant_bonferroni'] = coexp_cc_df['p_value_bonferroni'] < 0.05
 
-    return coexp_cc_df
+    return coexp_cc_df, bargraph_df
