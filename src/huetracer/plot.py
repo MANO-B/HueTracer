@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import numpy as np
 
 def plot_all_clusters_highlights(analyzer):
     """全Leidenクラスタのハイライトプロット"""
