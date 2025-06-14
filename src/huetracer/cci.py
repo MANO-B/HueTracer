@@ -43,17 +43,14 @@ def add_zscore_layers(sp_adata, top_fraction=0.1):
 
     sp_adata.layers["zscore_by_celltype"] = zero_matrix.copy()
     sp_adata.layers["zscore_all_celltype"] = zero_matrix.copy()
-    sp_adata.X = sp_adata.X.tocsr()
-    if scipy.sparse.issparse(sp_adata.X):
-        X_dense = sp_adata.X.toarray()
-    else:
-        X_dense = sp_adata.X.copy()
-    result = np.zeros_like(X_dense)
 
     # celltypeごとの zscore（make_positive_values の後で std で割る）
     for ct in sp_adata.obs["celltype"].unique():
         idx = sp_adata.obs["celltype"] == ct
-        X_sub = X_dense[idx,:]
+        X_sub = sp_adata.X[idx]
+        if sparse.issparse(X_sub):
+            X_sub = X_sub.toarray()
+
         mean = X_sub.mean(axis=0)
         std = np.array([
             np.std(gene_expr[gene_expr != 0]) if np.any(gene_expr != 0) else 0
@@ -61,11 +58,14 @@ def add_zscore_layers(sp_adata, top_fraction=0.1):
         ])
         std[std == 0] = 1
 
-        result[idx, :] = X_sub - mean
-        sp_adata.layers["zscore_by_celltype"][idx] = make_positive_values(result)
+        z = X_sub - mean
+        sp_adata.layers["zscore_by_celltype"][idx] = make_positive_values(z)
 
     # 全体の zscore（z は定義済みの X をそのまま）
-    X = X_dense
+    X = sp_adata.X
+    if sparse.issparse(X):
+        X = X.toarray()
+
     mean = X.mean(axis=0)
     std = np.array([
         np.std(gene_expr[gene_expr != 0]) if np.any(gene_expr != 0) else 0
