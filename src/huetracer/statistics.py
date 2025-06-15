@@ -5,16 +5,16 @@ import pandas as pd
 import numpy as np
 
 
-def beta_binomial_test_vs_population(success, trials, population_df, alpha=0.05, up_rate = 0.25):
+def beta_binomial_test_vs_population(success, trials, population_df, alpha=0.05, up_rate = 1.5):
     """
-    ベータ二項分布を用いて個々の相互作用が母集団より有意に高いかを検定
+    ベータ二項分布を用いて個々の相互作用が母集団の平均のup_rate倍より有意に高いかを検定
     
     Parameters:
     success: interaction_positive (成功数)
     trials: sender_positive (試行数)
     population_df: 母集団のデータフレーム
     alpha: 有意水準
-    up_rate: 平均よりもどれだけ相互作用が増加しているかの閾値
+    up_rate: 母集団の平均よりもどれだけ相互作用が増加しているかの閾値
     
     Returns:
     p_value: P値
@@ -36,7 +36,7 @@ def beta_binomial_test_vs_population(success, trials, population_df, alpha=0.05,
     # 重み付き平均（試行数で重み付け）
     total_success = other_interactions['interaction_positive'].sum()
     total_trials = other_interactions['sender_positive'].sum()
-    population_rate = (1 + up_rate) * total_success / total_trials if total_trials > 0 else 0
+    population_rate = up_rate * total_success / total_trials if total_trials > 0 else 0
     
     # 二項検定: 観測値が母集団平均よりup_rate以上有意に高いか
     p_value = 1 - binom.cdf(success - 1, trials, population_rate)
@@ -69,7 +69,7 @@ def wilson_score_interval(success, trials, alpha=0.05):
     
     return max(0, centre - half_width), min(1, centre + half_width)
 
-def calculate_coexpression_coactivity(edge_df, center_adata, exp_data, expr_up_by_ligands, role="sender"):
+def calculate_coexpression_coactivity(edge_df, center_adata, exp_data, expr_up_by_ligands, role="sender", up_rate = 1.5):
     # Xとexpr_upを更新するコピーを作成
     center_adata.X = exp_data
     center_adata_receiver = center_adata.copy()
@@ -135,7 +135,7 @@ def calculate_coexpression_coactivity(edge_df, center_adata, exp_data, expr_up_b
         p_val, ci_low_beta, ci_high_beta, is_sig, pop_mean = beta_binomial_test_vs_population(
             success, trials, coexp_cc_df, alpha=0.05
         )
-        ci_low_wilson, ci_high_wilson = wilson_score_interval(success, trials, alpha=0.05)
+        ci_low_wilson, ci_high_wilson = wilson_score_interval(success, trials, alpha=0.05, , up_rate = up_rate)
 
         ci_width_beta = ci_high_beta - ci_low_beta if not np.isnan(ci_high_beta) else np.nan
         ci_width_wilson = ci_high_wilson - ci_low_wilson
