@@ -1,0 +1,54 @@
+Metadata-Version: 2.4
+Name: huetracer
+Version: 0.0.3
+Summary: Analyze cell-cell interaction with spatial transcriptome data.
+Home-page: https://github.com/MANO-B/HueTracer
+Author: Masachika Ikegami
+Author-email: ikegamitky@gmail.com
+Project-URL: Bug Tracker, https://github.com/MANO-B/HueTracer/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+Requires-Dist: scipy
+Requires-Dist: tqdm
+Requires-Dist: scanpy
+Requires-Dist: scikit-image
+Requires-Dist: opencv-python
+Requires-Dist: pandas
+Requires-Dist: torch
+Requires-Dist: plotly
+Requires-Dist: matplotlib
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# HueTracer: Cell-cell interaction prediction model for Visium HD spatial transcriptome platform
+HueTracer is a software program created as a follow-up to [DeepCOLOR](https://github.com/kojikoji/deepcolor) software.
+
+## Instalation
+You can install HueTracer using pip command from your shell.
+```shell
+pip install huetracer
+```
+
+## Usage
+You need to prepare Visium HD spatial transcriptome data generated with SpaceRanger program by 10X. You can see the usage as follows.
+
+#### Visium HD giant cell tumor sample
+- [Nucleus segmentation tutorial](tutorial/nucleus_segmentation_tutorial.ipynb)  
+- [Cell type annotation for single cell transcriptome tutorial](tutorial/single_cell_annotation_tutorial.ipynb)  
+- [Cell type label transfer tutorial](tutorial/label_transfer_tutorial.ipynb)  
+
+#### Visium HD colon adenocarcinoma sample obtained from 10X website
+- [Nucleus segmentation tutorial](tutorial/nucleus_segmentation_tutorial_10x.ipynb)  
+- [Cell type annotation for single cell transcriptome tutorial](tutorial/single_cell_annotation_tutorial_10x.ipynb)  
+- [Cell type label transfer tutorial](tutorial/label_transfer_tutorial_10x.ipynb)  

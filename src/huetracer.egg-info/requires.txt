@@ -1,0 +1,11 @@
+numpy
+matplotlib
+scipy
+tqdm
+scanpy
+scikit-image
+opencv-python
+pandas
+torch
+plotly
+matplotlib

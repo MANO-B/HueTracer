@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='huetracer',
-    version='0.0.1',
+    version='0.0.3',
     description='Analyze cell-cell interaction with spatial transcriptome data.',
     author='Masachika Ikegami',
     author_email='ikegamitky@gmail.com',
