@@ -1,4 +1,5 @@
-# HueTracer: Cell-cell interaction prediction model for Visium HD spatial transcriptome platform
+# HueTracer <img src="source/HueTracer.png" width=50>
+## Cell-cell interaction prediction model for Visium HD spatial transcriptome platform
 HueTracer is a software program created as a follow-up to [DeepCOLOR](https://github.com/kojikoji/deepcolor) software.
 
 ## Instalation
