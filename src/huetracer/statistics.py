@@ -133,9 +133,9 @@ def calculate_coexpression_coactivity(edge_df, center_adata, exp_data, expr_up_b
         trials = row['sender_positive']
 
         p_val, ci_low_beta, ci_high_beta, is_sig, pop_mean = beta_binomial_test_vs_population(
-            success, trials, coexp_cc_df, alpha=0.05
+            success, trials, coexp_cc_df, alpha=0.05, up_rate = up_rate
         )
-        ci_low_wilson, ci_high_wilson = wilson_score_interval(success, trials, alpha=0.05, up_rate = up_rate)
+        ci_low_wilson, ci_high_wilson = wilson_score_interval(success, trials, alpha=0.05)
 
         ci_width_beta = ci_high_beta - ci_low_beta if not np.isnan(ci_high_beta) else np.nan
         ci_width_wilson = ci_high_wilson - ci_low_wilson
