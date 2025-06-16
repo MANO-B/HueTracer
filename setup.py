@@ -2,12 +2,12 @@ from setuptools import setup, find_packages
 
 setup(
     name='huetracer',
-    version='0.0.3',
+    version='0.0.4',
     description='Analyze cell-cell interaction with spatial transcriptome data.',
     author='Masachika Ikegami',
     author_email='ikegamitky@gmail.com',
     url='https://github.com/MANO-B/HueTracer',
-    package_dir={'': 'src'},  # ★ポイント：srcからパッケージを探す
+    package_dir={'': 'src'},
     packages=find_packages(where='src'),
     install_requires=[
         'numpy',
