@@ -67,16 +67,17 @@ def add_zscore_layers(sp_adata, top_fraction=0.1):
         idx = sp_adata.obs["celltype"] == ct
         X_sub = X_dense[idx]
         
-        # 平均と標準偏差を計算
+        # 平均を計算
         mean = X_sub.mean(axis=0)
-        std = np.array([
-            np.std(gene_expr[gene_expr != 0]) if np.any(gene_expr != 0) else 1
-            for gene_expr in X_sub.T
-        ])
-        std[std == 0] = 1  # ゼロ除算を防ぐ
+        # std = np.array([
+        #     np.std(gene_expr[gene_expr != 0]) if np.any(gene_expr != 0) else 1
+        #     for gene_expr in X_sub.T
+        # ])
+        # std[std == 0] = 1  # ゼロ除算を防ぐ
         
-        # z-scoreを計算
-        z = (X_sub - mean) / std
+        # 平均からの偏差を計算
+        # z = (X_sub - mean) / std
+        z = (X_sub - mean)
         
         # 正の値に変換してレイヤーに格納
         sp_adata.layers["zscore_by_celltype"][idx] = make_positive_values(z)
@@ -89,12 +90,14 @@ def add_zscore_layers(sp_adata, top_fraction=0.1):
     ])
     std_all[std_all == 0] = 1  # ゼロ除算を防ぐ
     
-    z_all = (X_dense - mean_all) / std_all
+    # 平均からの偏差を計算
+    # z_all = (X_dense - mean_all) / std_all
+    z_all = (X_dense - mean_all)
     zscore_all = make_positive_values(z_all)
     zscore_all = make_top_values(zscore_all, axis=0, top_fraction=top_fraction)
     
     sp_adata.layers["zscore_all_celltype"] = zscore_all
-
+    sp_adata.layers["zscore_by_celltype"] = sp_adata.layers["zscore_by_celltype"] / std_all
 
 def prepare_microenv_data(sp_adata_raw, sp_adata_microenvironment, lt_df_raw, min_frac=0.001, n_top_genes=2000):
     # 共通細胞の抽出
