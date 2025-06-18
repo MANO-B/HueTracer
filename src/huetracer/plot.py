@@ -6,7 +6,15 @@ import scanpy as sc
 import plotly.graph_objects as go
 
 def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num,
-                              bargraph_df, edge_df, cluster_cells, coexp_cc_df, lib_id, role="receiver"):
+                              bargraph_df, edge_df, cluster_cells, coexp_cc_df,
+                              lib_id, role="receiver", save=False,
+                              SAMPLE_NAME=None, save_path_for_today=None):
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    import seaborn as sns
+    import plotly.graph_objects as go
 
     # --- 全細胞タイプでの棒グラフ ---
     bargraph_df["cell1"] = edge_df["cell1"].values
@@ -16,14 +24,18 @@ def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num
     cluster_cells.obs['Gene_CCI'] = result_series
     mean_gene_cci = cluster_cells.obs.groupby('cluster')['Gene_CCI'].mean()
 
-    plt.figure(figsize=(10, 6))
-    mean_gene_cci.plot(kind='bar', color='skyblue')
-    plt.xlabel('Cluster')
-    plt.ylabel('Average ' + Gene_to_analyze + ' CCI')
-    plt.title('Mean ' + Gene_to_analyze + '-activated cells per TME cluster (all cell types)')
+    fig1, ax1 = plt.subplots(figsize=(10, 6))
+    mean_gene_cci.plot(kind='bar', color='skyblue', ax=ax1)
+    ax1.set_xlabel('Cluster')
+    ax1.set_ylabel('Average ' + Gene_to_analyze + ' CCI')
+    ax1.set_title('Mean ' + Gene_to_analyze + '-activated cells per TME cluster (all cell types)')
     plt.xticks(rotation=45)
     plt.tight_layout()
-    plt.show()
+    if save:
+        filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-activated_{target_cell_type}_barplot_all_clusters.pdf"
+        out_pdf = os.path.join(save_path_for_today, filename)
+        fig1.savefig(out_pdf, format="pdf", dpi=100, bbox_inches="tight")
+    plt.close(fig1)
 
     # --- 対象細胞タイプでの棒グラフ ---
     giant_mask = cluster_cells.obs["celltype"] == target_cell_type
@@ -32,33 +44,36 @@ def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num
     gene_counts = filtered_df.groupby("cell1")[Gene_to_analyze].sum()
     result_series = pd.Series(0, index=giant_indices, dtype=int)
     result_series.loc[gene_counts.index] = gene_counts.astype(int)
-    assert giant_mask.sum() == result_series.shape[0], "行数が一致しません！"
     cluster_cells.obs.loc[giant_mask, 'Gene_CCI'] = result_series
     target_adata = cluster_cells[giant_mask].copy()
     sum_gene_cci = target_adata.obs.groupby('cluster')['Gene_CCI'].sum()
     cluster_counts = target_adata.obs['cluster'].value_counts().sort_index()
     mean_gene_cci_per_cell = sum_gene_cci / cluster_counts
 
-    plt.figure(figsize=(10, 6))
-    mean_gene_cci_per_cell.plot(kind='bar', color='skyblue')
-    plt.xlabel('Cluster')
-    plt.ylabel('Average ' + Gene_to_analyze + ' CCI')
-    plt.title('Mean ' + Gene_to_analyze + '-activation rate of ' + target_cell_type + ' per TME cluster')
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    mean_gene_cci_per_cell.plot(kind='bar', color='skyblue', ax=ax2)
+    ax2.set_xlabel('Cluster')
+    ax2.set_ylabel('Average ' + Gene_to_analyze + ' CCI')
+    ax2.set_title('Mean ' + Gene_to_analyze + '-activation rate of ' + target_cell_type + ' per TME cluster')
     plt.xticks(rotation=45)
     plt.tight_layout()
-    plt.show()
+    if save:
+        filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-activated_{target_cell_type}_barplot_target_celltype.pdf"
+        out_pdf = os.path.join(save_path_for_today, filename)
+        fig2.savefig(out_pdf, format="pdf", dpi=100, bbox_inches="tight")
+    plt.close(fig2)
 
     # --- 空間図の描画 ---
     hires_img = cluster_cells.uns["spatial"][lib_id]["images"]["hires"]
     h, w = hires_img.shape[:2]
     scale = cluster_cells.uns["spatial"][lib_id]["scalefactors"]["tissue_hires_scalef"]
     coords = cluster_cells.obsm["spatial_cropped_150_buffer"].copy()
-    fig = plt.figure(figsize=(6, 6), dpi=100)
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.imshow(hires_img, extent=[0, w, h, 0], alpha=0.2)
-    ax.set_xlim(0, w)
-    ax.set_ylim(h, 0)
-    ax.axis('off')
+    fig3 = plt.figure(figsize=(6, 6), dpi=100)
+    ax3 = fig3.add_axes([0, 0, 1, 1])
+    ax3.imshow(hires_img, extent=[0, w, h, 0], alpha=0.2)
+    ax3.set_xlim(0, w)
+    ax3.set_ylim(h, 0)
+    ax3.axis('off')
     gene_cci_values = cluster_cells.obs["Gene_CCI"].copy()
     gene_cci_values[cluster_cells.obs['celltype'] != target_cell_type] = 0
     alphas = gene_cci_values.copy()
@@ -66,21 +81,24 @@ def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num
     alphas[gene_cci_values != 0] = 1
     coords[:, 0] = cluster_cells.obsm["spatial"][:, 0] * scale
     coords[:, 1] = cluster_cells.obsm["spatial"][:, 1] * scale
-    scatter = ax.scatter(
-        coords[:, 0],
-        coords[:, 1],
+    scatter = ax3.scatter(
+        coords[:, 0], coords[:, 1],
         c=gene_cci_values,
         cmap='jet',
         s=1,
         alpha=alphas,
         edgecolors='none'
     )
-    ax.set_title(Gene_to_analyze + '-activated ' + target_cell_type, fontsize=8)
-    cb = fig.colorbar(scatter, ax=ax, shrink=0.4, aspect=40, pad=0.02)
+    ax3.set_title(Gene_to_analyze + '-activated ' + target_cell_type, fontsize=8)
+    cb = fig3.colorbar(scatter, ax=ax3, shrink=0.4, aspect=40, pad=0.02)
     cb.set_label("CCI count", fontsize=6)
     cb.ax.tick_params(labelsize=6)
     plt.tight_layout()
-    plt.show()
+    if save:
+        filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-activated_{target_cell_type}_spatialmap.pdf"
+        out_pdf = os.path.join(save_path_for_today, filename)
+        fig3.savefig(out_pdf, format="pdf", dpi=1000, bbox_inches="tight")
+    plt.close(fig3)
 
     # --- Sankey図の描画 ---
     sub_coexp_cc_df = coexp_cc_df.query(f"cell1_type == '{target_cell_type}'")
@@ -131,17 +149,22 @@ def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num
     palette = sns.color_palette("tab10", n_colors=len(unique_labels)).as_hex()
     target_color_dict = dict(zip(unique_labels, palette))
     colors = pd.Series(target_color_dict)[labels]
-    fig = go.Figure(data=[go.Sankey(
+    fig4 = go.Figure(data=[go.Sankey(
         node=dict(label=tot_list),
         link=dict(source=sources, target=targets, value=values, color=colors, label=labels)
     )])
-    fig.update_layout(
+    fig4.update_layout(
         font_family="Courier New",
         width=600,
         height=1000,
         margin=dict(l=50, r=50, t=50, b=50)
     )
-    fig.show()
+    if save:
+        filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-activated_{target_cell_type}_sankey.pdf"
+        out_pdf = os.path.join(save_path_for_today, filename)
+        fig4.write_image(out_pdf, format="pdf", width=600, height=1000)
+
+    fig4.show()
                                   
 def plot_all_clusters_highlights(analyzer):
     """全Leidenクラスタのハイライトプロット"""
