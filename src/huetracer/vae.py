@@ -300,9 +300,9 @@ class SpatialMicroenvironmentAnalyzer:
         
         return self.umap_embedding, self.clusters
     
-    def visualize_results(self, figsize=(15, 12)):
+    def visualize_results(self, figsize=(15, 18)):
         # 基本的な可視化
-        fig, axes = plt.subplots(2, 3, figsize=figsize)
+        fig, axes = plt.subplots(3, 2, figsize=figsize)
         
         # 1. 訓練ロス
         axes[0, 0].plot(self.losses)
