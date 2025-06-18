@@ -319,7 +319,7 @@ class SpatialMicroenvironmentAnalyzer:
         plt.colorbar(scatter, ax=axes[0, 1])
         
         # 3. UMAP embedding
-        scatter2 = axes[0, 2].scatter(self.umap_embedding[:, 0], 
+        scatter2 = axes[1, 0].scatter(self.umap_embedding[:, 0], 
                                     self.umap_embedding[:, 1],
                                     c=self.clusters, cmap='tab20', s=0.5)
         axes[1, 0].set_title('UMAP Embedding (Colored by Cluster)')
