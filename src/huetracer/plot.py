@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import scanpy as sc
+import os
 import plotly.graph_objects as go
 
 def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num,
