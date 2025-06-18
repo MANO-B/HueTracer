@@ -322,25 +322,25 @@ class SpatialMicroenvironmentAnalyzer:
         scatter2 = axes[0, 2].scatter(self.umap_embedding[:, 0], 
                                     self.umap_embedding[:, 1],
                                     c=self.clusters, cmap='tab20', s=0.5)
-        axes[0, 2].set_title('UMAP Embedding (Colored by Cluster)')
-        axes[0, 2].set_xlabel('UMAP 1')
-        axes[0, 2].set_ylabel('UMAP 2')
-        plt.colorbar(scatter2, ax=axes[0, 2])
+        axes[1, 0].set_title('UMAP Embedding (Colored by Cluster)')
+        axes[1, 0].set_xlabel('UMAP 1')
+        axes[1, 0].set_ylabel('UMAP 2')
+        plt.colorbar(scatter2, ax=axes[1, 0])
         
         # 4. クラスター分布
         cluster_counts = np.bincount(self.clusters)
-        axes[1, 0].bar(range(len(cluster_counts)), cluster_counts)
-        axes[1, 0].set_title('Cluster Size Distribution')
-        axes[1, 0].set_xlabel('Cluster ID')
-        axes[1, 0].set_ylabel('Number of Cells')
+        axes[1, 1].bar(range(len(cluster_counts)), cluster_counts)
+        axes[1, 1].set_title('Cluster Size Distribution')
+        axes[1, 1].set_xlabel('Cluster ID')
+        axes[1, 1].set_ylabel('Number of Cells')
         
         # 5. 潜在特徴量の分布（最初の2次元）
-        axes[1, 1].scatter(self.latent_features[:, 0], 
+        axes[2, 0].scatter(self.latent_features[:, 0], 
                           self.latent_features[:, 1],
                           c=self.clusters, cmap='tab20', s=0.5, alpha=0.6)
-        axes[1, 1].set_title('Latent Features (Dim 0 vs 1)')
-        axes[1, 1].set_xlabel('Latent Feature Dimension 0')
-        axes[1, 1].set_ylabel('Latent Feature Dimension 1')
+        axes[2, 0].set_title('Latent Features (Dim 0 vs 1)')
+        axes[2, 0].set_xlabel('Latent Feature Dimension 0')
+        axes[2, 0].set_ylabel('Latent Feature Dimension 1')
         
         # 6. 潜在特徴量のヒートマップ（各クラスターの平均）
         cluster_means = []
@@ -350,11 +350,11 @@ class SpatialMicroenvironmentAnalyzer:
             cluster_means.append(cluster_mean)
         
         cluster_means = np.array(cluster_means)
-        im = axes[1, 2].imshow(cluster_means, aspect='auto', cmap='viridis')
-        axes[1, 2].set_title('Cluster Mean Latent Features')
-        axes[1, 2].set_xlabel('Latent Dimension')
-        axes[1, 2].set_ylabel('Cluster ID')
-        plt.colorbar(im, ax=axes[1, 2])
+        im = axes[2, 1].imshow(cluster_means, aspect='auto', cmap='viridis')
+        axes[2, 1].set_title('Cluster Mean Latent Features')
+        axes[2, 1].set_xlabel('Latent Dimension')
+        axes[2, 1].set_ylabel('Cluster ID')
+        plt.colorbar(im, ax=axes[2, 1])
         
         plt.tight_layout()
         plt.show()
