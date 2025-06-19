@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: huetracer
-Version: 0.0.9
+Version: 0.0.10
 Summary: Analyze cell-cell interaction with spatial transcriptome data.
 Home-page: https://github.com/MANO-B/HueTracer
 Author: Masachika Ikegami
