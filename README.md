@@ -17,7 +17,7 @@ You need to prepare Visium HD spatial transcriptome data generated with SpaceRan
 - [Cell type annotation for single cell transcriptome tutorial](tutorial/single_cell_annotation_tutorial.ipynb)  
 - [Cell type label transfer tutorial](tutorial/label_transfer_tutorial.ipynb)  
 - [Microenvironment prediction tutorial](tutorial/microenvironment_tutorial.ipynb)  
-- [Cell type label transfer tutorial](tutorial/cell_cell_interaction_tutorial.ipynb)  
+- [Cell-cell interaction tutorial](tutorial/cell_cell_interaction_tutorial.ipynb)  
 
 #### Visium HD colon adenocarcinoma sample obtained from 10X website (with version 0.0.4)
 Download Chromium/Visium HD files.  
@@ -29,4 +29,4 @@ Download Chromium/Visium HD files.
 - [Cell type annotation for single cell transcriptome tutorial](tutorial/single_cell_annotation_tutorial_10x.ipynb)  
 - [Cell type label transfer tutorial](tutorial/label_transfer_tutorial_10x.ipynb)  
 - [Microenvironment prediction tutorial](tutorial/microenvironment_tutorial_10x.ipynb)  
-- [Cell type label transfer tutorial](tutorial/cell_cell_interaction_tutorial_10x.ipynb)  
+- [Cell-cell interaction tutorial](tutorial/cell_cell_interaction_tutorial_10x.ipynb)  
