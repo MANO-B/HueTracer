@@ -3,3 +3,5 @@ from .vae import SpatialMicroenvironmentAnalyzer
 from .harmony import run_harmony
 from .plot import plot_all_cell_type_highlights, plot_all_clusters_highlights, plot_gene_cci_and_sankey
 from .cci import make_coexp_cc_df, make_non_zero_values, make_positive_values, make_top_values, safe_toarray, add_zscore_layers, construct_microenvironment_data, prepare_microenv_data
+from .selection import LassoCellSelectorMicroenvironment, lasso_selection_microenvironment, LassoCellSelectorCellType, lasso_selection_cell_type
+from .transfer import generate_quality_report, run_scvi_label_transfer, create_hires_overlay_plot, create_spatial_plot, create_confusion_matrix, analyze_predictions

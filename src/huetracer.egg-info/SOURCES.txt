@@ -6,6 +6,7 @@ src/huetracer/__init__.py
 src/huetracer/cci.py
 src/huetracer/harmony.py
 src/huetracer/plot.py
+src/huetracer/selection.py
 src/huetracer/statistics.py
 src/huetracer/vae.py
 src/huetracer.egg-info/PKG-INFO
@@ -13,3 +14,5 @@ src/huetracer.egg-info/SOURCES.txt
 src/huetracer.egg-info/dependency_links.txt
 src/huetracer.egg-info/requires.txt
 src/huetracer.egg-info/top_level.txt
+src/huetracer.egg-info/.ipynb_checkpoints/SOURCES-checkpoint.txt
+src/huetracer.egg-info/.ipynb_checkpoints/top_level-checkpoint.txt
