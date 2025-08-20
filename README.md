@@ -12,7 +12,7 @@ pip install huetracer
 ## Usage
 You need to prepare Visium HD spatial transcriptome data generated with SpaceRanger program by 10X. You can see the usage as follows.
 
-#### Visium HD giant cell tumor sample (with version 0.0.10)
+#### Visium HD giant cell tumor sample (with version 0.0.12)
 - [Nucleus segmentation tutorial](tutorial/nucleus_segmentation_tutorial.ipynb)  
 - [Cell type annotation for single cell transcriptome tutorial](tutorial/single_cell_annotation_tutorial.ipynb)  
 - [Cell type label transfer tutorial](tutorial/label_transfer_tutorial.ipynb)  
