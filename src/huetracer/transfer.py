@@ -10,47 +10,47 @@ import warnings
 from typing import Optional, Dict, Tuple, Any
 import logging
 
-# ログ設定
+# Log settings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SCVILabelTransfer:
-    """scANVIを使用した細胞タイプ転送のクラス"""
+    """Class for cell type transfer using scANVI"""
     
     def __init__(self, device = "auto"):
         """
         Parameters:
         -----------
         device : str or torch.device
-            計算デバイス ("auto", "cpu", "cuda", "mps", またはtorch.deviceオブジェクト)
+            Computational device ("auto", "cpu", "cuda", "mps", or a torch.device object)
         """
         self.device_str = self._setup_device(device)
-        self.device = self.device_str  # 後方互換性のため
+        self.device = self.device_str  # For backward compatibility
         self._configure_pytorch_settings()
         logger.info(f"Using device: {self.device_str}")
         
     def _configure_pytorch_settings(self):
-        """PyTorchとscvi-toolsの基本設定"""
+        """Basic settings for PyTorch and scvi-tools"""
         try:
             import torch
-            # デフォルトのnum_workersを設定
+            # Set default num_workers
             if hasattr(torch.utils.data, '_utils'):
-                # PyTorchのDataLoaderの警告を抑制
+                # Suppress PyTorch DataLoader warnings
                 import warnings
                 warnings.filterwarnings("ignore", ".*does not have many workers.*")
         except ImportError:
             pass
         
     def _setup_device(self, device) -> str:
-        """デバイス設定 - torch.deviceオブジェクトまたは文字列に対応"""
+        """Device setup - supports torch.device object or string"""
         try:
             import torch
             
-            # torch.deviceオブジェクトの場合
+            # If it's a torch.device object
             if isinstance(device, torch.device):
                 return str(device.type)
             
-            # 文字列の場合
+            # If it's a string
             if device == "auto":
                 if torch.cuda.is_available():
                     return "cuda"
@@ -62,41 +62,41 @@ class SCVILabelTransfer:
                 return str(device)
                 
         except ImportError:
-            logger.warning("PyTorchが見つかりません。CPUを使用します。")
+            logger.warning("PyTorch not found. Using CPU.")
             return "cpu"
     
     def prepare_data(self, 
-                    sc_adata: sc.AnnData, 
-                    sp_adata: sc.AnnData,
-                    cell_type_key: str = "cell_type_annotation") -> sc.AnnData:
+                     sc_adata: sc.AnnData, 
+                     sp_adata: sc.AnnData,
+                     cell_type_key: str = "cell_type_annotation") -> sc.AnnData:
         """
-        参照データとクエリデータを結合し、scANVI用に準備
+        Combines reference and query data and prepares it for scANVI
         
         Parameters:
         -----------
         sc_adata : AnnData
-            参照シングルセルデータ
+            Reference single-cell data
         sp_adata : AnnData  
-            クエリ空間データ
+            Query spatial data
         cell_type_key : str
-            細胞タイプアノテーションのキー
+            Key for cell type annotation
             
         Returns:
         --------
         adata_combined : AnnData
-            結合されたデータ
+            Combined data
         """
-        logger.info("データの準備を開始...")
+        logger.info("Starting data preparation...")
         
-        # 参照データの準備
+        # Prepare reference data
         adata_ref = sc_adata.copy()
-        adata_ref.obs['batch'] = 'reference'
+        #adata_ref.obs['batch'] = 'reference'
         if adata_ref.raw is not None:
             adata_ref.X = adata_ref.raw.X.copy()
             adata_ref.var = adata_ref.raw.var.copy()
             adata_ref.raw = None
             
-        # クエリデータの準備  
+        # Prepare query data  
         adata_query = sp_adata.copy()
         adata_query.obs['batch'] = 'query'
         if adata_query.raw is not None:
@@ -104,148 +104,155 @@ class SCVILabelTransfer:
             adata_query.var = adata_query.raw.var.copy()
             adata_query.raw = None
             
-        # データ結合
+        # Combine data
         adata_combined = adata_ref.concatenate(adata_query, batch_key="dataset")
+        adata_combined.obs['batch'] = pd.Categorical(adata_combined.obs['batch'])
         
-        # 細胞タイプアノテーションの処理
-        adata_combined = self._process_cell_type_labels(adata_combined, cell_type_key)
-        
-        logger.info(f"結合データサイズ: {adata_combined.shape}")
+        logger.info(f"Combined data size: {adata_combined.shape}")
         return adata_combined
     
     def _process_cell_type_labels(self, 
-                                 adata: sc.AnnData, 
-                                 cell_type_key: str) -> sc.AnnData:
-        """細胞タイプラベルの前処理"""
+                                  adata: sc.AnnData, 
+                                  cell_type_key: str) -> sc.AnnData:
+        """Pre-process cell type labels"""
         
         if cell_type_key not in adata.obs.columns:
             raise ValueError(f"Key '{cell_type_key}' not found in adata.obs")
             
         cat_col = adata.obs[cell_type_key].copy()
         
-        # カテゴリ型の処理
+        # Handle categorical type
         if isinstance(cat_col.dtype, pd.CategoricalDtype):
             if "Unknown" not in cat_col.cat.categories:
                 cat_col = cat_col.cat.add_categories(["Unknown"])
         
-        # 欠損値をUnknownに置換
+        # Replace missing values with Unknown
         cat_col = cat_col.fillna("Unknown")
         
-        # カテゴリの再設定
+        # Re-set categories
         categories = cat_col.unique().tolist()
         if "Unknown" not in categories:
             categories.append("Unknown")
             
         adata.obs[cell_type_key] = pd.Categorical(cat_col, categories=categories)
         
-        logger.info(f"細胞タイプカテゴリ数: {len(categories)}")
+        logger.info(f"Number of cell type categories: {len(categories)}")
         return adata
     
     def train_scvi_scanvi(self, 
-                         adata_combined: sc.AnnData,
-                         cell_type_key: str = "cell_type_annotation",
-                         max_epochs: int = 400,
-                         early_stopping: bool = True,
-                         num_workers: int = 4,
-                         batch_size: int = 128) -> Tuple[Any, Any]:
+                          adata_combined: sc.AnnData,
+                          cell_type_key: str = "cell_type_annotation",
+                          max_epochs: int = 50,
+                          early_stopping: bool = True,
+                          num_workers: int = 4,
+                          batch_size: int = 128) -> Tuple[Any, Any]:
         """
-        scVI/scANVIモデルの訓練
+        Train scVI/scANVI models
         
         Parameters:
         -----------
         adata_combined : AnnData
-            結合データ
+            Combined data
         cell_type_key : str
-            細胞タイプキー
+            Cell type key
         max_epochs : int
-            最大エポック数
+            Maximum number of epochs
         early_stopping : bool
-            早期停止を使用するか
+            Whether to use early stopping
         num_workers : int
-            DataLoaderのワーカー数（デフォルト: 4）
+            Number of DataLoader workers (default: 4)
         batch_size : int
-            バッチサイズ
+            Batch size
             
         Returns:
         --------
         scvi_model, scanvi_model : tuple
-            訓練済みモデル
+            Trained models
         """
-        logger.info("scVIモデルの訓練を開始...")
+        logger.info("Starting scVI model training...")
         
-        # DataLoaderの設定を最適化
+        # Optimize DataLoader settings
         import os
         if num_workers == "auto":
-            # CPUコア数に基づいて自動設定（最大16）
+            # Auto-configure based on CPU cores (max 16)
             num_workers = min(os.cpu_count(), 16)
         elif num_workers is None:
-            num_workers = 0  # マルチプロセシングを無効
+            num_workers = 0  # Disable multiprocessing
             
-        logger.info(f"DataLoader設定: num_workers={num_workers}, batch_size={batch_size}")
+        logger.info(f"DataLoader settings: num_workers={num_workers}, batch_size={batch_size}")
         
-        # scvi-tools用の設定
+        # Settings for scvi-tools
         if num_workers > 0:
-            # 環境変数で設定（最も確実な方法）
+            # Set via environment variable (most reliable way)
             os.environ['SCVI_NUM_WORKERS'] = str(num_workers)
             
-            # scvi settingsでの設定（利用可能な場合）
+            # Set via scvi settings (if available)
             try:
                 import scvi.settings as settings
                 if hasattr(settings, 'num_threads'):
                     settings.num_threads = num_workers
-                logger.info(f"scvi設定: num_workers={num_workers}")
+                logger.info(f"scvi settings: num_workers={num_workers}")
             except (ImportError, AttributeError):
-                logger.info("scvi.settingsでの設定はスキップ")
+                logger.info("Skipping scvi.settings configuration")
         
-        # PyTorchのDataLoaderデフォルト設定
-        try:
-            import torch
-            torch.utils.data.DataLoader.__init__.__defaults__ = (
-                None, 1, False, None, None, None, None, num_workers, False, False, None, 0.0, None, None, None, None
-            )
-        except Exception:
-            logger.info("PyTorch DataLoaderのデフォルト設定変更はスキップ")
+        # scVI setup and training
+        scvi.model.SCVI.setup_anndata(adata_combined,
+                                      batch_key="dataset",
+                                      categorical_covariate_keys=["batch"])
+        scvi_model = scvi.model.SCVI(adata_combined,
+                                     n_hidden=256,
+                                     n_latent=20,
+                                     n_layers=2,
+                                     dropout_rate=0.2,
+                                     dispersion="gene-batch",
+                                     gene_likelihood="zinb",
+                                     encode_covariates=True)
         
-        # scVIセットアップと訓練
-        scvi.model.SCVI.setup_anndata(adata_combined, batch_key="dataset")
-        scvi_model = scvi.model.SCVI(adata_combined)
-        
-        # デバイスの設定とモデル移動
+        # Set device and move model
         if self.device_str in ["cuda", "mps"]:
             scvi_model.module.to(self.device_str)
         
-        # acceleratorの設定 (scviのacceleratorは"gpu"/"cpu"のみサポート)
+        # Set accelerator (scvi only supports "gpu"/"cpu")
         accelerator = "gpu" if self.device_str in ["cuda", "mps"] else "cpu"
         
-        # 訓練設定の準備
+        # Prepare training arguments
         train_kwargs = {
             "accelerator": accelerator,
             "max_epochs": max_epochs,
             "early_stopping": early_stopping,
-            "check_val_every_n_epoch": 10,
+            "check_val_every_n_epoch": 1,
+            "train_size": 0.9,
+            "validation_size": 0.1,
+            "early_stopping_patience": 10,
+            "early_stopping_min_delta": 0.00
         }
         
-        # バッチサイズの設定（scvi-toolsバージョンによる）
+        # Set batch size (depends on scvi-tools version)
         try:
-            # 新しいバージョンでのバッチサイズ設定
+            # Set batch size in newer versions
             train_kwargs["batch_size"] = batch_size
         except Exception:
-            logger.warning("batch_sizeパラメータの直接設定はサポートされていません")
+            logger.warning("Direct setting of batch_size parameter is not supported")
         
-        # DataLoaderの設定を試行（環境変数での設定も可能）
+        # Try to set DataLoader configuration (can also be set via env var)
         if num_workers > 0:
-            # 確実に環境変数で設定
-            logger.info(f"環境変数SCVI_NUM_WORKERSを{num_workers}に設定")
+            # Reliably set via environment variable
+            logger.info(f"Setting environment variable SCVI_NUM_WORKERS to {num_workers}")
         
         scvi_model.train(**train_kwargs)
         
-        logger.info("scANVIモデルの訓練を開始...")
+        # Process cell type annotations
+        adata_combined = self._process_cell_type_labels(adata_combined, cell_type_key)
+
+        logger.info("Starting scANVI model training...")
         
-        # scANVIセットアップと訓練
+        # scANVI setup and training
         scvi.model.SCANVI.setup_anndata(
             adata_combined, 
             labels_key=cell_type_key, 
-            unlabeled_category="Unknown"
+            unlabeled_category="Unknown",
+            batch_key="dataset",  # SCVIと同じ
+            categorical_covariate_keys=["batch"]
         )
         
         scanvi_model = scvi.model.SCANVI.from_scvi_model(
@@ -254,42 +261,42 @@ class SCVILabelTransfer:
             unlabeled_category="Unknown"
         )
         
-        # デバイスの設定とモデル移動
+        # Set device and move model
         if self.device_str in ["cuda", "mps"]:
             scanvi_model.module.to(self.device_str)
         
-        # scANVIの訓練設定
+        # scANVI training settings
         scanvi_train_kwargs = {
             "accelerator": accelerator,
-            "max_epochs": max_epochs//2,  # scANVIは通常短めに訓練
+            "max_epochs": max_epochs//5,  # scANVI usually trains for fewer epochs
             "early_stopping": early_stopping,
             "check_val_every_n_epoch": 10,
         }
         
-        # バッチサイズの設定
+        # Set batch size
         try:
             scanvi_train_kwargs["batch_size"] = batch_size
         except Exception:
-            logger.warning("batch_sizeパラメータの直接設定はサポートされていません")
+            logger.warning("Direct setting of batch_size parameter is not supported")
             
         scanvi_model.train(**scanvi_train_kwargs)
         
-        logger.info("モデル訓練完了")
+        logger.info("Model training complete")
         return scvi_model, scanvi_model
     
     def predict_labels(self, 
-                      adata_combined: sc.AnnData,
-                      scanvi_model: Any,
-                      cell_type_key: str = "cell_type_annotation") -> sc.AnnData:
-        """ラベル予測の実行"""
+                     adata_combined: sc.AnnData,
+                     scanvi_model: Any,
+                     cell_type_key: str = "cell_type_annotation") -> sc.AnnData:
+        """Execute label prediction"""
         
-        logger.info("ラベル予測を実行...")
+        logger.info("Executing label prediction...")
         
-        # 予測実行
+        # Run prediction
         predicted_labels = scanvi_model.predict(adata_combined)
         adata_combined.obs["scvi_predicted_labels"] = predicted_labels
         
-        # 予測確率も取得（オプション）
+        # Get prediction probabilities as well (optional)
         predictions = scanvi_model.predict(adata_combined, soft=True)
         prediction_df = pd.DataFrame(
             predictions, 
@@ -297,81 +304,105 @@ class SCVILabelTransfer:
             columns=scanvi_model.adata.obs[cell_type_key].cat.categories
         )
         
-        # 最大確率を信頼度として保存
+        # Save max probability as confidence
         adata_combined.obs["prediction_confidence"] = prediction_df.max(axis=1)
         
-        logger.info("予測完了")
+        logger.info("Prediction complete")
         return adata_combined
     
     def transfer_labels_to_spatial(self, 
-                                  adata_combined: sc.AnnData,
-                                  sp_adata: sc.AnnData,
-                                  annotation_dict: Optional[Dict] = None) -> sc.AnnData:
-        """空間データに予測ラベルを転送"""
+                                 adata_combined: sc.AnnData,
+                                 sp_adata: sc.AnnData,
+                                 annotation_dict: Optional[Dict] = None) -> sc.AnnData:
+        """Transfer predicted labels to spatial data"""
         
-        logger.info("空間データへのラベル転送...")
+        logger.info("Transferring labels to spatial data...")
         
-        # Unknownラベルの予測結果を取得
+        # Get prediction results for Unknown labels
         unknown_mask = adata_combined.obs['cell_type_annotation'] == "Unknown"
         label_series = adata_combined.obs.loc[unknown_mask, 'scvi_predicted_labels']
         confidence_series = adata_combined.obs.loc[unknown_mask, 'prediction_confidence']
         
-        # インデックス処理（-1サフィックス除去）
+        # Process index (remove -1 suffix)
         base_index = label_series.index.str.replace(r'-1$', '', regex=True)
         label_series.index = base_index
         confidence_series.index = base_index
         
-        # 空間データに転送
+        # Find common indices
         common_idx = sp_adata.obs.index.intersection(label_series.index)
+        
+        # Handle categorical columns - add new categories if needed
+        if 'scvi_predicted_labels' in sp_adata.obs.columns:
+            if hasattr(sp_adata.obs['scvi_predicted_labels'], 'cat'):
+                # Get unique values from prediction
+                new_categories = set(label_series.loc[common_idx].unique())
+                existing_categories = set(sp_adata.obs['scvi_predicted_labels'].cat.categories)
+                missing_categories = new_categories - existing_categories
+                
+                if missing_categories:
+                    sp_adata.obs['scvi_predicted_labels'] = sp_adata.obs['scvi_predicted_labels'].cat.add_categories(list(missing_categories))
+        else:
+            # Create new column as object type first
+            sp_adata.obs['scvi_predicted_labels'] = pd.Series(index=sp_adata.obs.index, dtype=object)
+        
+        # Similar handling for confidence column
+        if 'prediction_confidence' not in sp_adata.obs.columns:
+            sp_adata.obs['prediction_confidence'] = pd.Series(index=sp_adata.obs.index, dtype=float)
+        
+        # Transfer to spatial data
         sp_adata.obs.loc[common_idx, 'scvi_predicted_labels'] = label_series.loc[common_idx]
         sp_adata.obs.loc[common_idx, 'prediction_confidence'] = confidence_series.loc[common_idx]
         
-        # アノテーション辞書でマッピング（提供されている場合）
+        # Map with annotation dictionary (if provided)
         if annotation_dict:
-            sp_adata.obs['predicted_cell_type'] = sp_adata.obs['scvi_predicted_labels'].map(annotation_dict)
+            # Create predicted_cell_type column
+            predicted_mapped = sp_adata.obs['scvi_predicted_labels'].map(annotation_dict)
+            sp_adata.obs['predicted_cell_type'] = predicted_mapped
         else:
-            sp_adata.obs['predicted_cell_type'] = sp_adata.obs['scvi_predicted_labels']
-            
+            sp_adata.obs['predicted_cell_type'] = sp_adata.obs['scvi_predicted_labels'].copy()
+        
+        # Convert to categorical
         sp_adata.obs['predicted_cell_type'] = sp_adata.obs['predicted_cell_type'].astype('category')
         
-        logger.info(f"転送完了: {len(common_idx)}個の細胞")
+        logger.info(f"Transfer complete: {len(common_idx)} cells")
         return sp_adata
 
 def analyze_predictions(sp_adata: sc.AnnData, 
-                       cluster_key: str = "leiden_nucleus",
-                       prediction_key: str = "predicted_cell_type") -> None:
-    """予測結果の解析と可視化"""
+                        cluster_key: str = "leiden_nucleus",
+                        prediction_key: str = "predicted_cell_type") -> None:
+    """Analysis and visualization of prediction results"""
     
-    # データの前処理
+    # Pre-process data
     sp_adata_predicted = sp_adata.copy()
     sc.pp.normalize_total(sp_adata_predicted, target_sum=1e4)
     sc.pp.log1p(sp_adata_predicted)
     
-    # 樹状図と差次元発現解析
+    # Dendrogram and differential gene expression analysis
     sc.tl.dendrogram(sp_adata_predicted, groupby=prediction_key)
     sc.tl.rank_genes_groups(sp_adata_predicted, prediction_key, method='wilcoxon', use_raw=False)
     
-    # ヒートマップ表示
+    # Display heatmap
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         sc.pl.rank_genes_groups_heatmap(sp_adata_predicted, show_gene_labels=True, use_raw=False)
     
-    # 混同行列の作成と表示
+    # Create and display confusion matrix
     create_confusion_matrix(sp_adata, cluster_key, prediction_key)
     
     return sp_adata_predicted
 
 def create_confusion_matrix(sp_adata: sc.AnnData, 
-                           cluster_key: str,
-                           prediction_key: str) -> None:
-    """混同行列の作成と可視化"""
+                            cluster_key: str,
+                            prediction_key: str) -> None:
+    """Create and visualize confusion matrix"""
     
     conf_matrix = pd.crosstab(sp_adata.obs[cluster_key], sp_adata.obs[prediction_key])
     conf_matrix_pct = conf_matrix.div(conf_matrix.sum(axis=1), axis=0)
     
     plt.figure(figsize=(12, 8))
-    sns.heatmap(conf_matrix_pct, annot=True, fmt=".2f", cmap="viridis", 
-                cbar=True, cbar_kws={'label': 'Proportion'})
+    sns.heatmap(conf_matrix_pct, annot=True, fmt=".2f", cmap="viridis", linewidths=0,
+            rasterized=True, cbar=True, cbar_kws={'label': 'Proportion'})
+    plt.grid(False)
     plt.xlabel("Predicted Cell Type")
     plt.ylabel("Leiden Cluster")
     plt.title("Confusion Matrix (Row-normalized)")
@@ -380,33 +411,33 @@ def create_confusion_matrix(sp_adata: sc.AnnData,
     plt.show()
 
 def create_spatial_plot(sp_adata: sc.AnnData,
-                       lib_id: str,
-                       sample_name: str,
-                       save_path: str,
-                       color_key: str = "predicted_cell_type") -> None:
-    """改善された空間プロット作成"""
+                        lib_id: str,
+                        sample_name: str,
+                        save_path: str,
+                        color_key: str = "predicted_cell_type") -> None:
+    """Improved spatial plot creation"""
     
-    # 基本的な空間プロット
+    # Basic spatial plot
     sc.pl.spatial(sp_adata, color=color_key,
                   title='Cell Type Annotation (scANVI)', 
                   size=20, img_key='hires', legend_fontsize=8,
                   spot_size=1, frameon=False)
     
-    # 高解像度オーバーレイプロット
+    # High-resolution overlay plot
     create_hires_overlay_plot(sp_adata, lib_id, sample_name, save_path, color_key)
 
 def create_hires_overlay_plot(sp_adata: sc.AnnData,
-                             lib_id: str, 
-                             sample_name: str,
-                             save_path: str,
-                             color_key: str = "predicted_cell_type") -> None:
-    """高解像度オーバーレイプロットの作成"""
+                              lib_id: str, 
+                              sample_name: str,
+                              save_path: str,
+                              color_key: str = "predicted_cell_type") -> None:
+    """Create high-resolution overlay plot"""
     
-    # 座標計算
+    # Coordinate calculation
     sf_hires = sp_adata.uns["spatial"][lib_id]["scalefactors"]["tissue_hires_scalef"]
     xy = (pd.DataFrame(sp_adata.obsm["spatial"] * sf_hires, 
-                      columns=["x", "y"], 
-                      index=sp_adata.obs_names)
+                       columns=["x", "y"], 
+                       index=sp_adata.obs_names)
           .join(sp_adata.obs["object_id"])
           .reset_index()
           .rename(columns={"index": "cell_id"}))
@@ -414,11 +445,11 @@ def create_hires_overlay_plot(sp_adata: sc.AnnData,
     merged = xy.merge(sp_adata.obs, on="object_id", how="inner")
     merged["group"] = merged[color_key].astype(str).str.strip()
     
-    # 色とマーカーの設定
+    # Set colors and markers
     group_order = sorted(merged["group"].dropna().unique())
     markers = ['o', 's', 'D', '^', 'v', '<', '>', 'p', '*', 'X', 'P', 'H', '8', 'd', '|']
     
-    # カラーパレットの選択（グループ数に応じて）
+    # Select color palette (based on number of groups)
     if len(group_order) <= 10:
         palette = sns.color_palette("tab10", n_colors=len(group_order))
     elif len(group_order) <= 20:
@@ -430,95 +461,95 @@ def create_hires_overlay_plot(sp_adata: sc.AnnData,
     marker_cycle = cycle(markers)
     marker_map = {group: next(marker_cycle) for group in group_order}
     
-    # プロット作成
+    # Create plot
     hires_img = sp_adata.uns["spatial"][lib_id]["images"]["hires"]
     h, w = hires_img.shape[:2]
     
     fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
     ax.imshow(hires_img, extent=[0, w, h, 0])
     
-    # 各グループを個別にプロット
+    # Plot each group individually
     for group in group_order:
         data_sub = merged[merged["group"] == group]
         ax.scatter(data_sub["x"], data_sub["y"],
-                  c=[color_map[group]], marker=marker_map[group],
-                  s=1.0, alpha=0.7, label=group,
-                  linewidths=0, rasterized=True)
+                   c=[color_map[group]], marker=marker_map[group],
+                   s=1.0, alpha=0.7, label=group,
+                   linewidths=0, rasterized=True)
     
     ax.invert_yaxis()
     ax.set_axis_off()
     
-    # 凡例の改善
+    # Improve legend
     legend = ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left",
-                      title="Cell Type", markerscale=10, 
-                      frameon=True, fancybox=True, shadow=True,
-                      fontsize=8, title_fontsize=10)
+                       title="Cell Type", markerscale=10, 
+                       frameon=True, fancybox=True, shadow=True,
+                       fontsize=8, title_fontsize=10)
     legend.get_frame().set_facecolor('white')
     legend.get_frame().set_alpha(0.9)
     
-    # 保存
+    # Save
     filename = f"{sample_name}_spatial_overlay_scANVI.pdf"
     out_pdf = os.path.join(save_path, filename)
     os.makedirs(save_path, exist_ok=True)
     fig.savefig(out_pdf, format="pdf", dpi=300, bbox_inches="tight")
     plt.close(fig)
     
-    logger.info(f"高解像度プロットを保存: {out_pdf}")
+    logger.info(f"High-resolution plot saved: {out_pdf}")
 
-# メイン実行例
+# Main execution example
 def run_scvi_label_transfer(filtered_sc_adata: sc.AnnData,
-                           sp_adata: sc.AnnData,
-                           annotation_dict: Dict,
-                           lib_id: str,
-                           sample_name: str,
-                           save_path_for_today: str,
-                           h5ad_predicted_full_save_path: str,
-                           device = "auto",
-                           num_workers: int = "auto",
-                           batch_size: int = 128,
-                           max_epochs: int = 400) -> sc.AnnData:
+                            sp_adata: sc.AnnData,
+                            annotation_dict: Dict,
+                            lib_id: str,
+                            sample_name: str,
+                            save_path_for_today: str,
+                            h5ad_predicted_full_save_path: str,
+                            device = "auto",
+                            num_workers: int = "auto",
+                            batch_size: int = 128,
+                            max_epochs: int = 400) -> sc.AnnData:
     """
-    完全なscANVI細胞タイプ転送パイプライン
+    Complete scANVI cell type transfer pipeline
     
     Parameters:
     -----------
     filtered_sc_adata : AnnData
-        フィルタリング済み参照データ
+        Filtered reference data
     sp_adata : AnnData
-        空間データ
+        Spatial data
     annotation_dict : dict
-        細胞タイプアノテーション辞書
+        Cell type annotation dictionary
     lib_id : str
-        ライブラリID
+        Library ID
     sample_name : str
-        サンプル名
+        Sample name
     save_path_for_today : str
-        保存パス
+        Save path
     h5ad_predicted_full_save_path : str
-        予測結果H5ADファイルパス
+        Path for the predicted H5AD file
     device : str or torch.device
-        計算デバイス
+        Computational device
     num_workers : int or "auto"
-        DataLoaderのワーカー数（"auto"で自動設定、推奨値は4-16）
+        Number of DataLoader workers ("auto" for automatic setting, recommended 4-16)
     batch_size : int
-        バッチサイズ（デフォルト: 128）
+        Batch size (default: 128)
     max_epochs : int
-        最大エポック数（デフォルト: 400）
+        Maximum number of epochs (default: 400)
         
     Returns:
     --------
     sp_adata_predicted : AnnData
-        予測結果付き空間データ
+        Spatial data with prediction results
     """
     
-    # scANVIラベル転送クラスの初期化
+    # Initialize scANVI label transfer class
     label_transfer = SCVILabelTransfer(device=device)
     
     try:
-        # 1. データ準備
+        # 1. Prepare data
         adata_combined = label_transfer.prepare_data(filtered_sc_adata, sp_adata)
         
-        # 2. モデル訓練
+        # 2. Train models
         scvi_model, scanvi_model = label_transfer.train_scvi_scanvi(
             adata_combined, 
             num_workers=num_workers,
@@ -526,67 +557,66 @@ def run_scvi_label_transfer(filtered_sc_adata: sc.AnnData,
             max_epochs=max_epochs
         )
         
-        # 3. 予測実行
+        # 3. Run prediction
         adata_combined = label_transfer.predict_labels(adata_combined, scanvi_model)
         
-        # 4. 空間データに転送
+        # 4. Transfer to spatial data
         sp_adata = label_transfer.transfer_labels_to_spatial(
             adata_combined, sp_adata, annotation_dict
         )
         
-        # 5. 結果解析
+        # 5. Analyze results
         sp_adata_predicted = analyze_predictions(sp_adata)
         
-        # 6. 可視化
+        # 6. Visualize
         create_spatial_plot(sp_adata, lib_id, sample_name, save_path_for_today)
         
-        # 7. 結果保存
+        # 7. Save results
         sp_adata_predicted.write_h5ad(h5ad_predicted_full_save_path)
-        logger.info(f"結果を保存: {h5ad_predicted_full_save_path}")
+        logger.info(f"Results saved: {h5ad_predicted_full_save_path}")
         
-        # 8. 品質評価レポート
+        # 8. Quality assessment report
         generate_quality_report(sp_adata_predicted, save_path_for_today, sample_name)
         
         return sp_adata_predicted
         
     except Exception as e:
-        logger.error(f"処理中にエラーが発生: {str(e)}")
+        logger.error(f"An error occurred during processing: {str(e)}")
         raise
 
 def generate_quality_report(sp_adata: sc.AnnData, 
-                           save_path: str, 
-                           sample_name: str) -> None:
-    """予測品質レポートの生成"""
+                            save_path: str, 
+                            sample_name: str) -> None:
+    """Generate a prediction quality report"""
     
     report_path = os.path.join(save_path, f"{sample_name}_quality_report.txt")
     
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write("=== scANVI細胞タイプ予測品質レポート ===\n\n")
+        f.write("=== scANVI Cell Type Prediction Quality Report ===\n\n")
         
-        # 基本統計
-        f.write("1. 基本統計\n")
-        f.write(f"   - 総細胞数: {sp_adata.n_obs:,}\n")
-        f.write(f"   - 予測細胞タイプ数: {sp_adata.obs['predicted_cell_type'].nunique()}\n")
+        # Basic statistics
+        f.write("1. Basic Statistics\n")
+        f.write(f"   - Total cells: {sp_adata.n_obs:,}\n")
+        f.write(f"   - Number of predicted cell types: {sp_adata.obs['predicted_cell_type'].nunique()}\n")
         
-        # 予測信頼度統計
+        # Prediction confidence statistics
         if 'prediction_confidence' in sp_adata.obs.columns:
             conf_stats = sp_adata.obs['prediction_confidence'].describe()
-            f.write(f"\n2. 予測信頼度統計\n")
-            f.write(f"   - 平均: {conf_stats['mean']:.3f}\n")
-            f.write(f"   - 中央値: {conf_stats['50%']:.3f}\n")
-            f.write(f"   - 最小値: {conf_stats['min']:.3f}\n")
-            f.write(f"   - 最大値: {conf_stats['max']:.3f}\n")
+            f.write(f"\n2. Prediction Confidence Statistics\n")
+            f.write(f"   - Mean: {conf_stats['mean']:.3f}\n")
+            f.write(f"   - Median: {conf_stats['50%']:.3f}\n")
+            f.write(f"   - Minimum: {conf_stats['min']:.3f}\n")
+            f.write(f"   - Maximum: {conf_stats['max']:.3f}\n")
             
-            # 低信頼度細胞の割合
+            # Ratio of low-confidence cells
             low_conf_ratio = (sp_adata.obs['prediction_confidence'] < 0.5).sum() / sp_adata.n_obs
-            f.write(f"   - 低信頼度細胞割合 (<0.5): {low_conf_ratio:.1%}\n")
+            f.write(f"   - Ratio of low-confidence cells (<0.5): {low_conf_ratio:.1%}\n")
         
-        # 細胞タイプ別統計
-        f.write(f"\n3. 細胞タイプ別分布\n")
+        # Cell type-specific statistics
+        f.write(f"\n3. Cell Type Distribution\n")
         type_counts = sp_adata.obs['predicted_cell_type'].value_counts()
         for cell_type, count in type_counts.items():
             ratio = count / sp_adata.n_obs
             f.write(f"   - {cell_type}: {count:,} ({ratio:.1%})\n")
     
-    logger.info(f"品質レポートを保存: {report_path}")
-    
+    logger.info(f"Quality report saved: {report_path}")

@@ -7,166 +7,730 @@ import os
 import plotly.graph_objects as go
 
 def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num,
-                              bargraph_df, edge_df, cluster_cells, coexp_cc_df,
-                              lib_id, role="receiver", save=False,
-                              SAMPLE_NAME=None, save_path_for_today=None):
+                             bargraph_df, edge_df, cluster_cells, coexp_cc_df,
+                             lib_id, role="receiver", save=False,
+                             SAMPLE_NAME=None, save_path_for_today=None,
+                             target_clusters=[0],
+                             coexp_cc_df_cluster=None, bargraph_df_cluster=None,
+                             display_column="interaction_positive",
+                             save_format="html"):
+    # Convert target_clusters to string if they're not already
+    target_clusters_str = [str(c) for c in target_clusters]
+    
+    # Jupyter環境での表示設定
+    plt.ion()  # インタラクティブモードを有効化
+    
+    # 必要な場合のみコピー作成
+    if cluster_cells.is_view:
+        cluster_cells = cluster_cells.copy()
+    
+    # データを配列として取得
+    gene_col_data = bargraph_df[Gene_to_analyze].values
+    cell1_data = edge_df["cell1"].values
+    
+    # pandasのgroupbyより高速なNumPy操作
+    unique_cells, inverse_indices = np.unique(cell1_data, return_inverse=True)
+    gene_counts_array = np.bincount(inverse_indices, weights=gene_col_data)
+    gene_counts = pd.Series(gene_counts_array, index=unique_cells, name=Gene_to_analyze)
+    
+    # intersection計算の高速化（setを使用）
+    cluster_obs_set = set(cluster_cells.obs_names)
+    valid_mask = np.array([cell in cluster_obs_set for cell in gene_counts.index])
+    valid_indices = gene_counts.index[valid_mask]
+    gene_counts_filtered = gene_counts.iloc[valid_mask]
+    
+    print(f"Debug: Total gene_counts: {len(gene_counts)}, Valid: {len(gene_counts_filtered)}")
+    
+    # Series作成の高速化（辞書マッピング使用）
+    result_array = np.zeros(len(cluster_cells.obs_names), dtype=int)
+    obs_name_to_idx = {name: i for i, name in enumerate(cluster_cells.obs_names)}
+    
+    # vectorized assignment
+    valid_idx_array = np.array([obs_name_to_idx[cell_id] for cell_id in valid_indices if cell_id in obs_name_to_idx])
+    valid_counts = gene_counts_filtered.loc[[cell_id for cell_id in valid_indices if cell_id in obs_name_to_idx]].values
+    result_array[valid_idx_array] = valid_counts.astype(int)
+    
+    cluster_cells.obs['Gene_CCI'] = result_array
+    
+    # groupby操作の高速化（NumPy使用）
+    cluster_labels = cluster_cells.obs['cluster'].values
+    gene_cci_values = cluster_cells.obs['Gene_CCI'].values
+    
+    # unique + boolean maskingで高速化
+    unique_clusters = np.unique(cluster_labels)
+    mean_gene_cci_list = []
+    for cluster in unique_clusters:
+        mask = cluster_labels == cluster
+        mean_gene_cci_list.append(np.mean(gene_cci_values[mask]))
+    
+    mean_gene_cci = pd.Series(mean_gene_cci_list, index=unique_clusters)
 
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import pandas as pd
-    import seaborn as sns
-    import plotly.graph_objects as go
-
-    # --- 全細胞タイプでの棒グラフ ---
-    bargraph_df["cell1"] = edge_df["cell1"].values
-    gene_counts = bargraph_df.groupby("cell1")[Gene_to_analyze].sum()
-    result_series = pd.Series(0, index=cluster_cells.obs_names, dtype=int)
-    result_series.loc[gene_counts.index] = gene_counts.astype(int)
-    cluster_cells.obs['Gene_CCI'] = result_series
-    mean_gene_cci = cluster_cells.obs.groupby('cluster')['Gene_CCI'].mean()
-
+    # --- Bar plot for all cell types ---
+    print("Creating bar plot 1...")
+    
+    # Calculate proportion of cells that received ligand stimulation at least once per cluster
+    stimulated_counts_list = []
+    total_counts_list = []
+    
+    for cluster in unique_clusters:
+        cluster_mask = cluster_labels == cluster
+        cluster_gene_cci = gene_cci_values[cluster_mask]
+        
+        # Count cells that received stimulation (CCI > 0) at least once
+        stimulated_count = np.sum(cluster_gene_cci > 0)
+        total_count = np.sum(cluster_mask)
+        
+        stimulated_counts_list.append(stimulated_count)
+        total_counts_list.append(total_count)
+    
+    stimulated_counts = pd.Series(stimulated_counts_list, index=unique_clusters)
+    total_counts = pd.Series(total_counts_list, index=unique_clusters)
+    
+    # Calculate proportion (percentage)
+    stimulation_proportion = np.divide(stimulated_counts.values, total_counts.values, 
+                                     out=np.zeros_like(stimulated_counts.values, dtype=float), 
+                                     where=total_counts.values!=0) * 100
+    stimulation_proportion = pd.Series(stimulation_proportion, index=unique_clusters)
+    
     fig1, ax1 = plt.subplots(figsize=(10, 6))
-    mean_gene_cci.plot(kind='bar', color='skyblue', ax=ax1)
+    stimulation_proportion.plot(kind='bar', color='skyblue', ax=ax1)
     ax1.set_xlabel('Cluster')
-    ax1.set_ylabel('Average ' + Gene_to_analyze + ' CCI')
-    ax1.set_title('Mean ' + Gene_to_analyze + '-activated cells per TME cluster (all cell types)')
+    ax1.set_ylabel('% of cells with ' + Gene_to_analyze + ' stimulation')
+    ax1.set_title('Proportion of cells receiving ' + Gene_to_analyze + '-stimulation per TME cluster (all cell types)')
+    #ax1.set_ylim(0, 100)  # Set y-axis to percentage scale
     plt.xticks(rotation=45)
     plt.tight_layout()
+    
+    # 表示してから保存
+    plt.show()
+    
     if save:
-        filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-activated_{target_cell_type}_barplot_all_clusters.pdf"
+        filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-stimulated_{target_cell_type}_proportion_all_clusters.pdf"
         out_pdf = os.path.join(save_path_for_today, filename)
         fig1.savefig(out_pdf, format="pdf", dpi=100, bbox_inches="tight")
+        print(f"Saved: {filename}")
+    
     plt.close(fig1)
 
-    # --- 対象細胞タイプでの棒グラフ ---
-    giant_mask = cluster_cells.obs["celltype"] == target_cell_type
-    giant_indices = giant_mask[giant_mask].index
-    filtered_df = bargraph_df[bargraph_df['cell1_type'] == target_cell_type]
-    gene_counts = filtered_df.groupby("cell1")[Gene_to_analyze].sum()
-    result_series = pd.Series(0, index=giant_indices, dtype=int)
-    result_series.loc[gene_counts.index] = gene_counts.astype(int)
-    cluster_cells.obs.loc[giant_mask, 'Gene_CCI'] = result_series
-    target_adata = cluster_cells[giant_mask].copy()
-    sum_gene_cci = target_adata.obs.groupby('cluster')['Gene_CCI'].sum()
-    cluster_counts = target_adata.obs['cluster'].value_counts().sort_index()
-    mean_gene_cci_per_cell = sum_gene_cci / cluster_counts
+    # --- Bar plot for the target cell type ---
+    print("Processing target cell type data...")
+    
+    # boolean indexingの高速化
+    celltype_values = cluster_cells.obs["celltype"].values
+    giant_mask = celltype_values == target_cell_type
+    giant_indices = cluster_cells.obs_names[giant_mask]
+    
+    if not np.any(giant_mask):
+        print(f"Warning: No cells found for target_cell_type '{target_cell_type}'")
+        return
+    
+    # DataFrame filteringの高速化
+    cell1_type_values = bargraph_df['cell1_type'].values
+    target_mask = cell1_type_values == target_cell_type
+    
+    if not np.any(target_mask):
+        print(f"Warning: No data found for target_cell_type '{target_cell_type}' in bargraph_df")
+        return
+    
+    # NumPy配列で直接フィルタリング
+    filtered_gene_data = gene_col_data[target_mask]
+    filtered_cell1_data = cell1_data[target_mask]
+    
+    # 高速なgroupby代替（NumPy）
+    unique_target_cells, inverse_indices = np.unique(filtered_cell1_data, return_inverse=True)
+    target_gene_counts_array = np.bincount(inverse_indices, weights=filtered_gene_data)
+    target_gene_counts = pd.Series(target_gene_counts_array, index=unique_target_cells)
+    
+    # intersection計算の高速化
+    giant_indices_set = set(giant_indices)
+    valid_target_mask = np.array([cell in giant_indices_set for cell in target_gene_counts.index])
+    valid_target_indices = target_gene_counts.index[valid_target_mask]
+    gene_counts_giant_filtered = target_gene_counts.iloc[valid_target_mask]
+    
+    print(f"Debug: Target celltype gene_counts: {len(target_gene_counts)}, Valid: {len(gene_counts_giant_filtered)}")
+    
+    # 結果の設定（vectorized操作）
+    target_result_array = np.zeros(len(giant_indices), dtype=int)
+    giant_name_to_idx = {name: i for i, name in enumerate(giant_indices)}
+    
+    # vectorized assignment
+    valid_giant_idx_array = np.array([giant_name_to_idx[cell_id] for cell_id in valid_target_indices if cell_id in giant_name_to_idx])
+    valid_giant_counts = gene_counts_giant_filtered.loc[[cell_id for cell_id in valid_target_indices if cell_id in giant_name_to_idx]].values
+    if len(valid_giant_idx_array) > 0:
+        target_result_array[valid_giant_idx_array] = valid_giant_counts.astype(int)
+    
+    # cluster_cells.obsの更新
+    cluster_cells.obs.loc[giant_mask, 'Gene_CCI'] = target_result_array
+    
+    # target計算の高速化（NumPy）
+    target_cluster_labels = cluster_labels[giant_mask]
+    target_gene_cci = gene_cci_values[giant_mask]
+    
+    unique_target_clusters = np.unique(target_cluster_labels)
+    sum_gene_cci_list = []
+    cluster_counts_list = []
+    
+    for cluster in unique_target_clusters:
+        cluster_mask = target_cluster_labels == cluster
+        sum_gene_cci_list.append(np.sum(target_gene_cci[cluster_mask]))
+        cluster_counts_list.append(np.sum(cluster_mask))
+    
+    sum_gene_cci = pd.Series(sum_gene_cci_list, index=unique_target_clusters)
+    cluster_counts = pd.Series(cluster_counts_list, index=unique_target_clusters)
+    
+    # ゼロ除算回避
+    mean_gene_cci_per_cell = np.divide(sum_gene_cci.values, cluster_counts.values, 
+                                       out=np.zeros_like(sum_gene_cci.values, dtype=float), 
+                                       where=cluster_counts.values!=0)
+    mean_gene_cci_per_cell = pd.Series(mean_gene_cci_per_cell, index=unique_target_clusters)
+
+    print("Creating bar plot 2...")
+    
+    # Calculate proportion of target cell type that received ligand stimulation per cluster
+    target_stimulated_counts_list = []
+    target_total_counts_list = []
+    
+    for cluster in unique_target_clusters:
+        cluster_mask = target_cluster_labels == cluster
+        cluster_target_gene_cci = target_gene_cci[cluster_mask]
+        
+        # Count target cells that received stimulation (CCI > 0) at least once
+        target_stimulated_count = np.sum(cluster_target_gene_cci > 0)
+        target_total_count = np.sum(cluster_mask)
+        
+        target_stimulated_counts_list.append(target_stimulated_count)
+        target_total_counts_list.append(target_total_count)
+    
+    target_stimulated_counts = pd.Series(target_stimulated_counts_list, index=unique_target_clusters)
+    target_total_counts = pd.Series(target_total_counts_list, index=unique_target_clusters)
+    
+    # Calculate proportion (percentage) for target cell type
+    target_stimulation_proportion = np.divide(target_stimulated_counts.values, target_total_counts.values, 
+                                            out=np.zeros_like(target_stimulated_counts.values, dtype=float), 
+                                            where=target_total_counts.values!=0) * 100
+    target_stimulation_proportion = pd.Series(target_stimulation_proportion, index=unique_target_clusters)
 
     fig2, ax2 = plt.subplots(figsize=(10, 6))
-    mean_gene_cci_per_cell.plot(kind='bar', color='skyblue', ax=ax2)
+    target_stimulation_proportion.plot(kind='bar', color='skyblue', ax=ax2)
     ax2.set_xlabel('Cluster')
-    ax2.set_ylabel('Average ' + Gene_to_analyze + ' CCI')
-    ax2.set_title('Mean ' + Gene_to_analyze + '-activation rate of ' + target_cell_type + ' per TME cluster')
+    ax2.set_ylabel('% of ' + target_cell_type + ' with ' + Gene_to_analyze + ' stimulation')
+    ax2.set_title('Proportion of ' + target_cell_type + ' receiving ' + Gene_to_analyze + '-stimulation per TME cluster')
+    #ax2.set_ylim(0, 100)  # Set y-axis to percentage scale
     plt.xticks(rotation=45)
     plt.tight_layout()
+    
+    # 表示してから保存
+    plt.show()
+    
     if save:
-        filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-activated_{target_cell_type}_barplot_target_celltype.pdf"
+        filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-stimulated_{target_cell_type}_proportion_target_celltype.pdf"
         out_pdf = os.path.join(save_path_for_today, filename)
         fig2.savefig(out_pdf, format="pdf", dpi=100, bbox_inches="tight")
+        print(f"Saved: {filename}")
+    
     plt.close(fig2)
 
-    # --- 空間図の描画 ---
+    # --- Plot spatial map ---
+    # 画像とデータの事前準備
     hires_img = cluster_cells.uns["spatial"][lib_id]["images"]["hires"]
     h, w = hires_img.shape[:2]
     scale = cluster_cells.uns["spatial"][lib_id]["scalefactors"]["tissue_hires_scalef"]
-    coords = cluster_cells.obsm["spatial_cropped_150_buffer"].copy()
-    fig3 = plt.figure(figsize=(6, 6), dpi=100)
-    ax3 = fig3.add_axes([0, 0, 1, 1])
+    
+    # spatial座標の高速処理（vectorized操作）
+    spatial_coords = cluster_cells.obsm["spatial"] * scale
+    
+    fig3, ax3 = plt.subplots(figsize=(6, 6), dpi=100)
     ax3.imshow(hires_img, extent=[0, w, h, 0], alpha=0.2)
     ax3.set_xlim(0, w)
     ax3.set_ylim(h, 0)
     ax3.axis('off')
-    gene_cci_values = cluster_cells.obs["Gene_CCI"].copy()
-    gene_cci_values[cluster_cells.obs['celltype'] != target_cell_type] = 0
-    alphas = gene_cci_values.copy()
-    alphas[gene_cci_values == 0] = 0
-    alphas[gene_cci_values != 0] = 1
-    coords[:, 0] = cluster_cells.obsm["spatial"][:, 0] * scale
-    coords[:, 1] = cluster_cells.obsm["spatial"][:, 1] * scale
+    
+    # boolean操作の高速化（NumPy）
+    gene_cci_plot_values = gene_cci_values.copy()
+    non_target_mask = celltype_values != target_cell_type
+    gene_cci_plot_values[non_target_mask] = 0
+    
+    # alpha値の計算（vectorized）
+    alphas = (gene_cci_plot_values != 0).astype(float)
+    
     scatter = ax3.scatter(
-        coords[:, 0], coords[:, 1],
-        c=gene_cci_values,
+        spatial_coords[:, 0], spatial_coords[:, 1],
+        c=gene_cci_plot_values,
         cmap='jet',
         s=1,
         alpha=alphas,
         edgecolors='none'
     )
     ax3.set_title(Gene_to_analyze + '-activated ' + target_cell_type, fontsize=8)
-    cb = fig3.colorbar(scatter, ax=ax3, shrink=0.4, aspect=40, pad=0.02)
+    
+    cax = fig3.add_axes([0.85, 0.2, 0.03, 0.6])
+    cb = fig3.colorbar(scatter, cax=cax)
     cb.set_label("CCI count", fontsize=6)
     cb.ax.tick_params(labelsize=6)
-    plt.tight_layout()
+    plt.subplots_adjust(left=0.05, right=0.82, top=0.95, bottom=0.05)
+    
+    # 表示してから保存
+    plt.show()
+    
     if save:
         filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-activated_{target_cell_type}_spatialmap.pdf"
         out_pdf = os.path.join(save_path_for_today, filename)
         fig3.savefig(out_pdf, format="pdf", dpi=1000, bbox_inches="tight")
+        print(f"Saved: {filename}")
+    
     plt.close(fig3)
 
-    # --- Sankey図の描画 ---
-    sub_coexp_cc_df = coexp_cc_df.query(f"cell1_type == '{target_cell_type}'")
-    sub_coexp_cc_df = sub_coexp_cc_df[sub_coexp_cc_df.is_significant]
-    sub_coexp_cc_df = sub_coexp_cc_df.sort_values(
+    # --- Plot Sankey diagram 1: All clusters ---
+    # query操作の高速化（NumPy boolean indexing）
+    cell1_type_coexp = coexp_cc_df['cell1_type'].values
+    target_coexp_mask = cell1_type_coexp == target_cell_type
+    sub_coexp_cc_df_all = coexp_cc_df[target_coexp_mask].copy()
+    
+    if 'is_significant' in sub_coexp_cc_df_all.columns:
+        sig_mask = sub_coexp_cc_df_all['is_significant'].values
+        sub_coexp_cc_df_all = sub_coexp_cc_df_all[sig_mask]
+    
+    if len(sub_coexp_cc_df_all) == 0:
+        print(f"Warning: No significant interactions found for {target_cell_type}")
+        return
+    
+    # sort_values + groupby.head の処理
+    sub_coexp_cc_df_all = sub_coexp_cc_df_all.sort_values(
         'coactivity_per_sender_cell_expr_ligand', ascending=False
     ).groupby('cell2_type', as_index=False).head(n=each_display_num)
 
-    cell1types = np.unique(sub_coexp_cc_df["cell1_type"])
-    cell2types = np.unique(sub_coexp_cc_df["cell2_type"])
-    tot_list = (
-        list(sub_coexp_cc_df.ligand.unique()) +
-        list(cell2types) +
-        list(cell1types)
+    # Sankeyダイアグラムの作成（全クラスター）
+    cell1types_all = np.unique(sub_coexp_cc_df_all["cell1_type"])
+    cell2types_all = np.unique(sub_coexp_cc_df_all["cell2_type"])
+    tot_list_all = (
+        list(sub_coexp_cc_df_all.ligand.unique()) +
+        list(cell2types_all) +
+        list(cell1types_all)
     )
-    ligand_pos_dict = pd.Series({
-        ligand: i for i, ligand in enumerate(sub_coexp_cc_df.ligand.unique())
+    
+    ligand_pos_dict_all = pd.Series({
+        ligand: i for i, ligand in enumerate(sub_coexp_cc_df_all.ligand.unique())
     })
-    celltype_pos_dict = pd.Series({
-        celltype: i + len(ligand_pos_dict) for i, celltype in enumerate(cell2types)
+    celltype_pos_dict_all = pd.Series({
+        celltype: i + len(ligand_pos_dict_all) for i, celltype in enumerate(cell2types_all)
     })
-    receiver_dict = pd.Series({
-        celltype: i + len(ligand_pos_dict) + len(cell2types)
-        for i, celltype in enumerate(cell1types)
+    receiver_dict_all = pd.Series({
+        celltype: i + len(ligand_pos_dict_all) + len(cell2types_all)
+        for i, celltype in enumerate(cell1types_all)
     })
 
-    senders = (sub_coexp_cc_df.cell1_type.values
-               if role == "sender" else sub_coexp_cc_df.cell2_type.values)
-    receivers = (sub_coexp_cc_df.cell2_type.values
-                 if role == "sender" else sub_coexp_cc_df.cell1_type.values)
-    sources = pd.concat([
-        ligand_pos_dict.loc[sub_coexp_cc_df.ligand.values],
-        celltype_pos_dict.loc[senders]
+    senders_all = (sub_coexp_cc_df_all.cell1_type.values
+                   if role == "sender" else sub_coexp_cc_df_all.cell2_type.values)
+    receivers_all = (sub_coexp_cc_df_all.cell2_type.values
+                     if role == "sender" else sub_coexp_cc_df_all.cell1_type.values)
+    
+    sources_all = pd.concat([
+        ligand_pos_dict_all.loc[sub_coexp_cc_df_all.ligand.values],
+        celltype_pos_dict_all.loc[senders_all]
     ])
-    targets = pd.concat([
-        receiver_dict.loc[receivers],
-        ligand_pos_dict.loc[sub_coexp_cc_df.ligand.values]
+    targets_all = pd.concat([
+        receiver_dict_all.loc[receivers_all],
+        ligand_pos_dict_all.loc[sub_coexp_cc_df_all.ligand.values]
     ])
-    values = pd.concat([
-        sub_coexp_cc_df['interaction_positive'],
-        sub_coexp_cc_df['interaction_positive']
+    values_all = pd.concat([
+        sub_coexp_cc_df_all[display_column],
+        sub_coexp_cc_df_all[display_column]
     ])
-    labels = pd.concat([
-        sub_coexp_cc_df['cell1_type'],
-        sub_coexp_cc_df['cell2_type']
+    labels_all = pd.concat([
+        sub_coexp_cc_df_all['cell1_type'],
+        sub_coexp_cc_df_all['cell2_type']
     ])
-    unique_labels = labels.unique()
-    palette = sns.color_palette("tab10", n_colors=len(unique_labels)).as_hex()
-    target_color_dict = dict(zip(unique_labels, palette))
-    colors = pd.Series(target_color_dict)[labels]
+    
+    unique_labels_all = labels_all.unique()
+    palette_all = sns.color_palette("tab10", n_colors=len(unique_labels_all)).as_hex()
+    target_color_dict_all = dict(zip(unique_labels_all, palette_all))
+    colors_all = pd.Series(target_color_dict_all)[labels_all]
+    
     fig4 = go.Figure(data=[go.Sankey(
-        node=dict(label=tot_list),
-        link=dict(source=sources, target=targets, value=values, color=colors, label=labels)
+        node=dict(label=tot_list_all),
+        link=dict(source=sources_all, target=targets_all, value=values_all, color=colors_all, label=labels_all)
     )])
     fig4.update_layout(
+        title=f"{target_cell_type} - All Clusters",
         font_family="Courier New",
         width=600,
         height=1000,
-        margin=dict(l=50, r=50, t=50, b=50)
+        margin=dict(l=50, r=50, t=80, b=50)
     )
+    
     if save:
-        filename = f"{SAMPLE_NAME}_{Gene_to_analyze}-activated_{target_cell_type}_sankey.pdf"
-        out_pdf = os.path.join(save_path_for_today, filename)
-        fig4.write_image(out_pdf, format="pdf", width=600, height=1000)
+        # Choose save format based on parameter
+        if save_format == "html":
+            filename = f"{SAMPLE_NAME}_{target_cell_type}_sankey_all_clusters.html"
+            out_file = os.path.join(save_path_for_today, filename)
+            fig4.write_html(out_file)
+            print(f"Saved HTML: {filename}")
+        elif save_format == "png":
+            filename = f"{SAMPLE_NAME}_{target_cell_type}_sankey_all_clusters.png"
+            out_file = os.path.join(save_path_for_today, filename)
+            fig4.write_image(out_file, format="png", width=600, height=1000, scale=2)
+            print(f"Saved PNG: {filename}")
+        elif save_format == "both":
+            # HTML (fast)
+            filename_html = f"{SAMPLE_NAME}_{target_cell_type}_sankey_all_clusters.html"
+            out_html = os.path.join(save_path_for_today, filename_html)
+            fig4.write_html(out_html)
+            print(f"Saved HTML: {filename_html}")
+            
+            # PNG (medium speed)
+            try:
+                filename_png = f"{SAMPLE_NAME}_{target_cell_type}_sankey_all_clusters.png"
+                out_png = os.path.join(save_path_for_today, filename_png)
+                fig4.write_image(out_png, format="png", width=600, height=1000, scale=2)
+                print(f"Saved PNG: {filename_png}")
+            except Exception as e:
+                print(f"PNG save failed: {e}")
+        else:  # pdf (slow - not recommended)
+            filename = f"{SAMPLE_NAME}_{target_cell_type}_sankey_all_clusters.pdf"
+            out_file = os.path.join(save_path_for_today, filename)
+            print(f"Warning: PDF save is slow. Consider using save_format='html' or 'png'")
+            fig4.write_image(out_file, format="pdf", width=600, height=1000)
+            print(f"Saved PDF: {filename}")
 
     fig4.show()
-                                  
+
+    # --- Plot Sankey diagram 2: Target clusters only ---
+    # Use cluster-specific data if provided
+    if coexp_cc_df_cluster is not None and bargraph_df_cluster is not None:
+        coexp_data_for_cluster = coexp_cc_df_cluster
+        bargraph_data_for_cluster = bargraph_df_cluster
+    else:
+        coexp_data_for_cluster = coexp_cc_df
+        bargraph_data_for_cluster = bargraph_df
+    
+    # FIXED: 正しいクラスターフィルタリングロジック
+    target_cell_mask = cluster_cells.obs['celltype'] == target_cell_type
+    target_cluster_mask = cluster_cells.obs['cluster'].astype(str).isin(target_clusters_str)
+    combined_mask = target_cell_mask & target_cluster_mask
+    target_cluster_cells = cluster_cells.obs_names[combined_mask]
+    
+    if len(target_cluster_cells) == 0:
+        print(f"Warning: No {target_cell_type} cells found in target clusters {target_clusters}")
+        return
+    
+    # FIXED: edge_dfの正しいフィルタリング
+    # edge_dfにcell1_clusterカラムがない可能性が高いため、直接cell1でフィルタ
+    target_edge_mask = edge_df['cell1'].isin(target_cluster_cells)
+    filtered_edge_df_target = edge_df[target_edge_mask]
+    filtered_bargraph_df_target = bargraph_data_for_cluster[target_edge_mask]
+    
+    if len(filtered_edge_df_target) == 0:
+        print(f"Warning: No interactions found for {target_cell_type} in target clusters")
+        return
+    
+    # FIXED: target cluster用のcoexp_cc_dfを再計算
+    # 元のcoexp_cc_dfから対象細胞タイプのデータをフィルタして、
+    # 実際にtarget clusterに存在する相互作用のみを抽出
+    
+    # まず、target clusterの細胞が関与する相互作用を特定
+    target_cell_interactions = set()
+    
+    # filtered_edge_df_targetから実際に存在するcell2_typeを取得
+    actual_cell2_types = set(filtered_edge_df_target['cell2_type'].unique())
+    
+    # クラスター特有のcoexp_cc_dfから、target_cell_typeがcell1_typeで、
+    # かつcell2_typeが実際にtarget clusterに存在するもののみを抽出
+    target_coexp_mask = (
+        (coexp_data_for_cluster['cell1_type'] == target_cell_type) &
+        (coexp_data_for_cluster['cell2_type'].isin(actual_cell2_types))
+    )
+    
+    sub_coexp_cc_df_target = coexp_data_for_cluster[target_coexp_mask].copy()
+    
+    if 'is_significant' in sub_coexp_cc_df_target.columns:
+        sig_mask = sub_coexp_cc_df_target['is_significant'].values
+        sub_coexp_cc_df_target = sub_coexp_cc_df_target[sig_mask]
+    
+    if len(sub_coexp_cc_df_target) == 0:
+        print(f"Warning: No significant interactions found for {target_cell_type} in target clusters")
+        return
+    
+    # 上位相互作用を選択
+    sub_coexp_cc_df_target = sub_coexp_cc_df_target.sort_values(
+        'coactivity_per_sender_cell_expr_ligand', ascending=False
+    ).groupby('cell2_type', as_index=False).head(n=each_display_num)
+    
+    # Sankeyダイアグラムの作成（ターゲットクラスター）
+    cell1types_target = np.unique(sub_coexp_cc_df_target["cell1_type"])
+    cell2types_target = np.unique(sub_coexp_cc_df_target["cell2_type"])
+    tot_list_target = (
+        list(sub_coexp_cc_df_target.ligand.unique()) +
+        list(cell2types_target) +
+        list(cell1types_target)
+    )
+    
+    ligand_pos_dict_target = pd.Series({
+        ligand: i for i, ligand in enumerate(sub_coexp_cc_df_target.ligand.unique())
+    })
+    celltype_pos_dict_target = pd.Series({
+        celltype: i + len(ligand_pos_dict_target) for i, celltype in enumerate(cell2types_target)
+    })
+    receiver_dict_target = pd.Series({
+        celltype: i + len(ligand_pos_dict_target) + len(cell2types_target)
+        for i, celltype in enumerate(cell1types_target)
+    })
+
+    senders_target = (sub_coexp_cc_df_target.cell1_type.values
+                      if role == "sender" else sub_coexp_cc_df_target.cell2_type.values)
+    receivers_target = (sub_coexp_cc_df_target.cell2_type.values
+                        if role == "sender" else sub_coexp_cc_df_target.cell1_type.values)
+    
+    sources_target = pd.concat([
+        ligand_pos_dict_target.loc[sub_coexp_cc_df_target.ligand.values],
+        celltype_pos_dict_target.loc[senders_target]
+    ])
+    targets_target = pd.concat([
+        receiver_dict_target.loc[receivers_target],
+        ligand_pos_dict_target.loc[sub_coexp_cc_df_target.ligand.values]
+    ])
+    values_target = pd.concat([
+        sub_coexp_cc_df_target[display_column],
+        sub_coexp_cc_df_target[display_column]
+    ])
+    labels_target = pd.concat([
+        sub_coexp_cc_df_target['cell1_type'],
+        sub_coexp_cc_df_target['cell2_type']
+    ])
+    
+    unique_labels_target = labels_target.unique()
+    palette_target = sns.color_palette("Set2", n_colors=len(unique_labels_target)).as_hex()
+    target_color_dict_target = dict(zip(unique_labels_target, palette_target))
+    colors_target = pd.Series(target_color_dict_target)[labels_target]
+    
+    fig5 = go.Figure(data=[go.Sankey(
+        node=dict(label=tot_list_target),
+        link=dict(source=sources_target, target=targets_target, value=values_target, color=colors_target, label=labels_target)
+    )])
+    fig5.update_layout(
+        title=f"{target_cell_type} - Clusters {target_clusters}",
+        font_family="Courier New",
+        width=600,
+        height=1000,
+        margin=dict(l=50, r=50, t=80, b=50)
+    )
+    
+    if save:
+        # Choose save format based on parameter
+        if save_format == "html":
+            filename = f"{SAMPLE_NAME}_{target_cell_type}_sankey_target_clusters.html"
+            out_file = os.path.join(save_path_for_today, filename)
+            fig5.write_html(out_file)
+            print(f"Saved HTML: {filename}")
+        elif save_format == "png":
+            filename = f"{SAMPLE_NAME}_{target_cell_type}_sankey_target_clusters.png"
+            out_file = os.path.join(save_path_for_today, filename)
+            fig5.write_image(out_file, format="png", width=600, height=1000, scale=2)
+            print(f"Saved PNG: {filename}")
+        elif save_format == "both":
+            # HTML (fast)
+            filename_html = f"{SAMPLE_NAME}_{target_cell_type}_sankey_target_clusters.html"
+            out_html = os.path.join(save_path_for_today, filename_html)
+            fig5.write_html(out_html)
+            print(f"Saved HTML: {filename_html}")
+            
+            # PNG (medium speed)
+            try:
+                filename_png = f"{SAMPLE_NAME}_{target_cell_type}_sankey_target_clusters.png"
+                out_png = os.path.join(save_path_for_today, filename_png)
+                fig5.write_image(out_png, format="png", width=600, height=1000, scale=2)
+                print(f"Saved PNG: {filename_png}")
+            except Exception as e:
+                print(f"PNG save failed: {e}")
+        else:  # pdf (slow - not recommended)
+            filename = f"{SAMPLE_NAME}_{target_cell_type}_sankey_target_clusters.pdf"
+            out_file = os.path.join(save_path_for_today, filename)
+            print(f"Warning: PDF save is slow. Consider using save_format='html' or 'png'")
+            fig5.write_image(out_file, format="pdf", width=600, height=1000)
+            print(f"Saved PDF: {filename}")
+
+    fig5.show()
+    
+    print(f"Successfully generated NumPy-optimized plots for {target_cell_type} - {Gene_to_analyze}")
+    print("Two Sankey diagrams created:")
+    print("1. All clusters")
+    print(f"2. Target clusters: {target_clusters}")
+    print("All plots should now be displayed above.")
+
+    
+    # Get all gene columns from bargraph_df
+    gene_columns = [col for col in bargraph_df.columns if col not in ['cell1_type', 'cell2_type']]
+    
+    # Calculate total ligand response for each cell (sum across all genes)
+    total_ligand_data = bargraph_df[gene_columns].values
+    total_ligand_response_per_cell = np.sum(total_ligand_data, axis=1)
+    
+    # Create mapping from cell1 to total response
+    cell1_to_total_response = dict(zip(edge_df["cell1"].values, total_ligand_response_per_cell))
+    
+    # Map to cluster_cells
+    total_response_array = np.zeros(len(cluster_cells.obs_names), dtype=int)
+    for i, cell_name in enumerate(cluster_cells.obs_names):
+        if cell_name in cell1_to_total_response:
+            total_response_array[i] = int(cell1_to_total_response[cell_name])
+    
+    cluster_cells.obs['Total_Ligand_Response'] = total_response_array
+    
+    # --- Fig6: Bar plot for all cell types (total ligand response) ---
+    
+    total_response_values = cluster_cells.obs['Total_Ligand_Response'].values
+    
+    # Calculate proportion of cells that received any ligand stimulation per cluster
+    total_stimulated_counts_list = []
+    total_counts_list = []
+    
+    for cluster in unique_clusters:
+        cluster_mask = cluster_labels == cluster
+        cluster_total_response = total_response_values[cluster_mask]
+        
+        # Count cells that received any stimulation (total response > 0)
+        total_stimulated_count = np.sum(cluster_total_response > 0)
+        total_count = np.sum(cluster_mask)
+        
+        total_stimulated_counts_list.append(total_stimulated_count)
+        total_counts_list.append(total_count)
+    
+    total_stimulated_counts = pd.Series(total_stimulated_counts_list, index=unique_clusters)
+    total_counts = pd.Series(total_counts_list, index=unique_clusters)
+    
+    # Calculate proportion (percentage)
+    total_stimulation_proportion = np.divide(total_stimulated_counts.values, total_counts.values, 
+                                           out=np.zeros_like(total_stimulated_counts.values, dtype=float), 
+                                           where=total_counts.values!=0) * 100
+    total_stimulation_proportion = pd.Series(total_stimulation_proportion, index=unique_clusters)
+    
+    fig6, ax6 = plt.subplots(figsize=(10, 6))
+    total_stimulation_proportion.plot(kind='bar', color='lightcoral', ax=ax6)
+    ax6.set_xlabel('Cluster')
+    ax6.set_ylabel('% of cells with any ligand stimulation')
+    ax6.set_title('Proportion of cells receiving any ligand stimulation per TME cluster (all cell types)')
+    #ax6.set_ylim(0, 100)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    plt.show()
+    
+    if save:
+        filename = f"{SAMPLE_NAME}_total-ligand-stimulated_{target_cell_type}_proportion_all_clusters.pdf"
+        out_pdf = os.path.join(save_path_for_today, filename)
+        fig6.savefig(out_pdf, format="pdf", dpi=100, bbox_inches="tight")
+        print(f"Saved: {filename}")
+    
+    plt.close(fig6)
+    
+    # --- Fig7: Bar plot for target cell type (total ligand response) ---
+    
+    # Filter for target cell type and calculate total response
+    target_total_response_values = total_response_values[giant_mask]
+    
+    # Calculate proportion of target cells that received any ligand stimulation per cluster
+    target_total_stimulated_counts_list = []
+    target_total_counts_list = []
+    
+    for cluster in unique_target_clusters:
+        cluster_mask = target_cluster_labels == cluster
+        cluster_target_total_response = target_total_response_values[cluster_mask]
+        
+        # Count target cells that received any stimulation
+        target_total_stimulated_count = np.sum(cluster_target_total_response > 0)
+        target_total_count = np.sum(cluster_mask)
+        
+        target_total_stimulated_counts_list.append(target_total_stimulated_count)
+        target_total_counts_list.append(target_total_count)
+    
+    target_total_stimulated_counts = pd.Series(target_total_stimulated_counts_list, index=unique_target_clusters)
+    target_total_counts = pd.Series(target_total_counts_list, index=unique_target_clusters)
+    
+    # Calculate proportion (percentage) for target cell type
+    target_total_stimulation_proportion = np.divide(target_total_stimulated_counts.values, target_total_counts.values, 
+                                                  out=np.zeros_like(target_total_stimulated_counts.values, dtype=float), 
+                                                  where=target_total_counts.values!=0) * 100
+    target_total_stimulation_proportion = pd.Series(target_total_stimulation_proportion, index=unique_target_clusters)
+
+    fig7, ax7 = plt.subplots(figsize=(10, 6))
+    target_total_stimulation_proportion.plot(kind='bar', color='lightcoral', ax=ax7)
+    ax7.set_xlabel('Cluster')
+    ax7.set_ylabel('% of ' + target_cell_type + ' with any ligand stimulation')
+    ax7.set_title('Proportion of ' + target_cell_type + ' receiving any ligand stimulation per TME cluster')
+    #ax7.set_ylim(0, 100)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    plt.show()
+    
+    if save:
+        filename = f"{SAMPLE_NAME}_total-ligand-stimulated_{target_cell_type}_proportion_target_celltype.pdf"
+        out_pdf = os.path.join(save_path_for_today, filename)
+        fig7.savefig(out_pdf, format="pdf", dpi=100, bbox_inches="tight")
+        print(f"Saved: {filename}")
+    
+    plt.close(fig7)
+    
+    # --- Fig8: Spatial map (total ligand response) ---
+    
+    # 画像とデータの事前準備
+    hires_img = cluster_cells.uns["spatial"][lib_id]["images"]["hires"]
+    h, w = hires_img.shape[:2]
+    scale = cluster_cells.uns["spatial"][lib_id]["scalefactors"]["tissue_hires_scalef"]
+    
+    # spatial座標の高速処理（vectorized操作）
+    spatial_coords = cluster_cells.obsm["spatial"] * scale
+    
+    fig8, ax8 = plt.subplots(figsize=(6, 6), dpi=100)
+    ax8.imshow(hires_img, extent=[0, w, h, 0], alpha=0.2)
+    ax8.set_xlim(0, w)
+    ax8.set_ylim(h, 0)
+    ax8.axis('off')
+    
+    # boolean操作の高速化（NumPy）
+    total_response_plot_values = total_response_values.copy()
+    non_target_mask = celltype_values != target_cell_type
+    total_response_plot_values[non_target_mask] = 0
+    
+    # alpha値の計算（vectorized）
+    alphas = (total_response_plot_values != 0).astype(float)
+    
+    scatter = ax8.scatter(
+        spatial_coords[:, 0], spatial_coords[:, 1],
+        c=total_response_plot_values,
+        cmap='Reds',  # Different colormap for total response
+        s=1,
+        alpha=alphas,
+        edgecolors='none'
+    )
+    ax8.set_title('Total ligand-stimulated ' + target_cell_type, fontsize=8)
+    
+    cax = fig8.add_axes([0.85, 0.2, 0.03, 0.6])
+    cb = fig8.colorbar(scatter, cax=cax)
+    cb.set_label("Total CCI count", fontsize=6)
+    cb.ax.tick_params(labelsize=6)
+    plt.subplots_adjust(left=0.05, right=0.82, top=0.95, bottom=0.05)
+    
+    plt.show()
+    
+    if save:
+        filename = f"{SAMPLE_NAME}_total-ligand-stimulated_{target_cell_type}_spatialmap_cropped.pdf"
+        out_pdf = os.path.join(save_path_for_today, filename)
+        fig8.savefig(out_pdf, format="pdf", dpi=1000, bbox_inches="tight")
+        print(f"Saved: {filename}")
+    
+    plt.close(fig8)
+    # 表示確認
+    print("All plots (including total ligand response) should now be displayed above.")
+    print("Generated plots:")
+    print("Fig1: Single ligand stimulation proportion (all cell types)")
+    print("Fig2: Single ligand stimulation proportion (target cell type)")
+    print("Fig3: Single ligand spatial map")
+    print("Fig4: Single ligand Sankey (all clusters)")
+    print("Fig5: Single ligand Sankey (target clusters)")
+    print("Fig6: Total ligand stimulation proportion (all cell types)")
+    print("Fig7: Total ligand stimulation proportion (target cell type)")
+    print("Fig8: Total ligand spatial map")
+
 def plot_all_clusters_highlights(analyzer):
     """全Leidenクラスタのハイライトプロット"""
     
@@ -307,3 +871,4 @@ def plot_all_cell_type_highlights(analyzer):
     plt.show()
     
     return fig
+    
