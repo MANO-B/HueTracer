@@ -12,7 +12,7 @@ pip install huetracer
 ## Usage
 You need to prepare Visium HD spatial transcriptome data generated with SpaceRanger program by 10X. You can see the usage as follows.
 
-#### Visium HD giant cell tumor sample (with version 0.0.12)
+#### Visium HD giant cell tumor sample (with version 0.0.13)
 Our own tumor samples, 10X Chromium and Visium HD analyses  
 - [Nucleus segmentation tutorial](tutorial/nucleus_segmentation_tutorial.ipynb)  
 - [Cell type annotation for single cell transcriptome tutorial](tutorial/single_cell_annotation_tutorial.ipynb)  
@@ -20,7 +20,7 @@ Our own tumor samples, 10X Chromium and Visium HD analyses
 - [Microenvironment prediction tutorial](tutorial/microenvironment_tutorial.ipynb)  
 - [Cell-cell interaction tutorial](tutorial/cell_cell_interaction_tutorial.ipynb)  
 
-#### Visium HD colon adenocarcinoma sample obtained from 10X website (with version 0.0.12)
+#### Visium HD colon adenocarcinoma sample obtained from 10X website (with version 0.0.13)
 Download Chromium/Visium HD files.  
 [Chromium single cell transctiptome aggregated files](https://www.10xgenomics.com/platforms/visium/product-family/dataset-human-crc), Feature barcode matrix (filtered)  
 [Visium HD spatial transcriptome P2 CRC files](https://www.10xgenomics.com/jp/datasets/visium-hd-cytassist-gene-expression-libraries-of-human-crc), Binned outputs (all bin levels), Microscope image (BTF)  
