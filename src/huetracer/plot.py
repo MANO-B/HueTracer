@@ -5,14 +5,17 @@ import seaborn as sns
 import scanpy as sc
 import os
 import plotly.graph_objects as go
+from collections import defaultdict, Counter
 
-def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num,
+def plot_gene_cci_and_sankey(target_cell_type, sender_cell_type, Gene_to_analyze, each_display_num,
                              bargraph_df, edge_df, cluster_cells, coexp_cc_df,
                              lib_id, role="receiver", save=False,
                              SAMPLE_NAME=None, save_path_for_today=None,
                              target_clusters=[0],
                              coexp_cc_df_cluster=None, bargraph_df_cluster=None,
                              display_column="interaction_positive",
+                             significant_column='is_significant_bonferroni',
+                             minimum_interaction=10,
                              save_format="html"):
     # Convert target_clusters to string if they're not already
     target_clusters_str = [str(c) for c in target_clusters]
@@ -286,17 +289,24 @@ def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num
     target_coexp_mask = cell1_type_coexp == target_cell_type
     sub_coexp_cc_df_all = coexp_cc_df[target_coexp_mask].copy()
     
-    if 'is_significant' in sub_coexp_cc_df_all.columns:
-        sig_mask = sub_coexp_cc_df_all['is_significant'].values
+    if significant_column in sub_coexp_cc_df_all.columns:
+        sig_mask = sub_coexp_cc_df_all[significant_column] == True
         sub_coexp_cc_df_all = sub_coexp_cc_df_all[sig_mask]
     
     if len(sub_coexp_cc_df_all) == 0:
         print(f"Warning: No significant interactions found for {target_cell_type}")
         return
     
+    if 'interaction_positive' in sub_coexp_cc_df_all.columns:
+        interaction_filter = sub_coexp_cc_df_all['interaction_positive'] >= minimum_interaction
+        sub_coexp_cc_df_all = sub_coexp_cc_df_all[interaction_filter]
+    
+        interaction_filter = sub_coexp_cc_df_all['cell2_type'].isin(sender_cell_type)
+        sub_coexp_cc_df_all = sub_coexp_cc_df_all[interaction_filter]
+
     # sort_values + groupby.head の処理
     sub_coexp_cc_df_all = sub_coexp_cc_df_all.sort_values(
-        'coactivity_per_sender_cell_expr_ligand', ascending=False
+        display_column, ascending=False
     ).groupby('cell2_type', as_index=False).head(n=each_display_num)
 
     # Sankeyダイアグラムの作成（全クラスター）
@@ -351,9 +361,9 @@ def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num
         link=dict(source=sources_all, target=targets_all, value=values_all, color=colors_all, label=labels_all)
     )])
     fig4.update_layout(
-        title=f"{target_cell_type} - All Clusters",
+        title=f"{target_cell_type}<br><sub>Only ≥{minimum_interaction} interactions</sub>",
         font_family="Courier New",
-        width=600,
+        width=1000,
         height=1000,
         margin=dict(l=50, r=50, t=80, b=50)
     )
@@ -442,17 +452,27 @@ def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num
     
     sub_coexp_cc_df_target = coexp_data_for_cluster[target_coexp_mask].copy()
     
-    if 'is_significant' in sub_coexp_cc_df_target.columns:
-        sig_mask = sub_coexp_cc_df_target['is_significant'].values
+    if significant_column in sub_coexp_cc_df_target.columns:
+        sig_mask = sub_coexp_cc_df_target[significant_column] == True
         sub_coexp_cc_df_target = sub_coexp_cc_df_target[sig_mask]
     
     if len(sub_coexp_cc_df_target) == 0:
         print(f"Warning: No significant interactions found for {target_cell_type} in target clusters")
         return
+
+    if 'interaction_positive' in sub_coexp_cc_df_target.columns:
+        interaction_filter = sub_coexp_cc_df_target['interaction_positive'] >= minimum_interaction
+        sub_coexp_cc_df_target = sub_coexp_cc_df_target[interaction_filter]
+        print(f"interaction_positive >= {minimum_interaction} filtering: {len(sub_coexp_cc_df_target)} interactions remain")
+
+        interaction_filter = sub_coexp_cc_df_target['cell2_type'].isin(sender_cell_type)
+        sub_coexp_cc_df_target = sub_coexp_cc_df_target[interaction_filter]
+        print(f"sender filtering: {len(sub_coexp_cc_df_target)} interactions remain")
+
     
     # 上位相互作用を選択
     sub_coexp_cc_df_target = sub_coexp_cc_df_target.sort_values(
-        'coactivity_per_sender_cell_expr_ligand', ascending=False
+        display_column, ascending=False
     ).groupby('cell2_type', as_index=False).head(n=each_display_num)
     
     # Sankeyダイアグラムの作成（ターゲットクラスター）
@@ -507,9 +527,9 @@ def plot_gene_cci_and_sankey(target_cell_type, Gene_to_analyze, each_display_num
         link=dict(source=sources_target, target=targets_target, value=values_target, color=colors_target, label=labels_target)
     )])
     fig5.update_layout(
-        title=f"{target_cell_type} - Clusters {target_clusters}",
+        title=f"{target_cell_type} - Clusters {target_clusters}<br><sub>Only ≥{minimum_interaction} interactions</sub>",
         font_family="Courier New",
-        width=600,
+        width=1000,
         height=1000,
         margin=dict(l=50, r=50, t=80, b=50)
     )
@@ -871,4 +891,315 @@ def plot_all_cell_type_highlights(analyzer):
     plt.show()
     
     return fig
+
+# English Font Settings
+plt.rcParams['font.family'] = 'DejaVu Sans'
+sns.set_style("whitegrid")
+
+def calculate_observed_proximities(df):
+    """
+    Calculate actually observed proximity counts
+    """
+    proximities = defaultdict(int)
     
+    # For each cell1, count the types of its neighbors
+    for _, row in df.iterrows():
+        cell1_type = row['cell1_type']
+        cell2_type = row['cell2_type']
+        
+        # Count proximity using cell type pairs as keys
+        pair = tuple(sorted([cell1_type, cell2_type]))
+        proximities[pair] += 1
+    
+    return dict(proximities)
+
+def get_cell_info(df):
+    """
+    Get information about each cell and neighbor relationships
+    """
+    cell_info = {}
+    
+    # Collect basic information for each cell
+    for _, row in df.iterrows():
+        cell1_id = row['cell1']
+        cell2_id = row['cell2']
+        
+        # Record cell1 information
+        if cell1_id not in cell_info:
+            cell_info[cell1_id] = {
+                'type': row['cell1_type'],
+                'cluster': row['cell1_cluster'],
+                'neighbors': []
+            }
+        
+        # Record cell2 information  
+        if cell2_id not in cell_info:
+            cell_info[cell2_id] = {
+                'type': row['cell2_type'], 
+                'cluster': row['cell2_cluster'],
+                'neighbors': []
+            }
+        
+        # Record neighbor relationships
+        cell_info[cell1_id]['neighbors'].append(cell2_id)
+    
+    return cell_info
+
+def permutation_test_optimized(df, n_permutations=1000, random_seed=42):
+    """
+    Optimized permutation test to evaluate statistical significance
+    """
+    np.random.seed(random_seed)
+    
+    # Calculate actual observations
+    observed_proximities = calculate_observed_proximities(df)
+    
+    # Get cell information
+    cell_info = get_cell_info(df)
+    
+    # Lists of all cell IDs and types
+    all_cell_ids = np.array(list(cell_info.keys()))
+    all_cell_types = np.array([cell_info[cell_id]['type'] for cell_id in all_cell_ids])
+    
+    print(f"Total number of cells: {len(all_cell_ids)}")
+    print(f"Cell type varieties: {set(all_cell_types)}")
+    print(f"Observed proximity patterns: {observed_proximities}")
+    
+    # Pre-compute neighbor arrays for faster access
+    neighbor_arrays = {}
+    for cell_id in all_cell_ids:
+        neighbor_indices = [np.where(all_cell_ids == neighbor_id)[0][0] 
+                          for neighbor_id in cell_info[cell_id]['neighbors']]
+        neighbor_arrays[cell_id] = np.array(neighbor_indices)
+    
+    # Store permutation results
+    permuted_proximities = {pair: np.zeros(n_permutations) for pair in observed_proximities.keys()}
+    
+    print(f"\nRunning permutation test ({n_permutations} iterations)...")
+    
+    for perm in range(n_permutations):
+        if (perm + 1) % 100 == 0:
+            print(f"  Progress: {perm + 1}/{n_permutations}")
+        
+        # Randomly shuffle cell types
+        shuffled_types = np.random.permutation(all_cell_types)
+        
+        # Calculate proximity counts with shuffled data
+        perm_proximities = defaultdict(int)
+        
+        for i, cell1_id in enumerate(all_cell_ids):
+            cell1_type = shuffled_types[i]
+            
+            # Get neighbor indices and their types
+            neighbor_indices = neighbor_arrays[cell1_id]
+            for neighbor_idx in neighbor_indices:
+                cell2_type = shuffled_types[neighbor_idx]
+                pair = tuple(sorted([cell1_type, cell2_type]))
+                perm_proximities[pair] += 1
+        
+        # Record results for each pair
+        for pair in observed_proximities.keys():
+            permuted_proximities[pair][perm] = perm_proximities.get(pair, 0)
+    
+    return observed_proximities, permuted_proximities
+
+def calculate_statistics(observed_proximities, permuted_proximities):
+    """
+    Calculate statistical values (log fold change, p-value)
+    """
+    results = []
+    
+    for pair, observed_count in observed_proximities.items():
+        perm_counts = permuted_proximities[pair]
+        
+        # Expected value
+        expected_count = np.mean(perm_counts)
+        
+        # Log fold change calculation (add small value to avoid division by zero)
+        log_fc = np.log2((observed_count + 1) / (expected_count + 1))
+        
+        # p-value calculation (two-tailed test)
+        if log_fc >= 0:
+            # Probability of getting values >= observed
+            p_value = np.sum(perm_counts >= observed_count) / len(perm_counts)
+        else:
+            # Probability of getting values <= observed  
+            p_value = np.sum(perm_counts <= observed_count) / len(perm_counts)
+        
+        # Two-tailed test, so multiply by 2
+        p_value = min(2 * p_value, 1.0)
+        
+        # Determine if cell types are the same
+        is_same_type = pair[0] == pair[1]
+        
+        results.append({
+            'cell_type_pair': f"{pair[0]} - {pair[1]}",
+            'type1': pair[0],
+            'type2': pair[1],
+            'is_same_type': is_same_type,
+            'observed_count': observed_count,
+            'expected_count': expected_count,
+            'log_fold_change': log_fc,
+            'p_value': p_value,
+            'significant': p_value < 0.05
+        })
+    
+    return pd.DataFrame(results)
+
+def create_horizontal_barplot(results_df, save_path=None, sample_name="sample"):
+    """
+    Create horizontal bar plots (separated by same type vs different type)
+    Figure height proportional to number of combinations
+    """
+    # Separate data into same type and different type
+    same_type = results_df[results_df['is_same_type'] == True].copy()
+    diff_type = results_df[results_df['is_same_type'] == False].copy()
+    
+    # Sort by log fold change
+    same_type = same_type.sort_values('log_fold_change')
+    diff_type = diff_type.sort_values('log_fold_change')
+    
+    # Calculate dynamic figure height based on number of combinations
+    base_height = 3
+    height_per_item = 0.5
+    same_height = max(base_height, len(same_type) * height_per_item)
+    diff_height = max(base_height, len(diff_type) * height_per_item)
+    total_height = same_height + diff_height + 2  # Add space for titles
+    
+    fig, axes = plt.subplots(2, 1, figsize=(12, total_height), 
+                            gridspec_kw={'height_ratios': [same_height, diff_height]}, 
+                            sharex=True)
+    
+    # Same cell type pairs
+    if len(same_type) > 0:
+        colors_same = ['red' if p < 0.05 else 'lightcoral' for p in same_type['p_value']]
+        y_pos_same = np.arange(len(same_type))
+        
+        bars1 = axes[0].barh(y_pos_same, same_type['log_fold_change'], color=colors_same, alpha=0.8)
+        axes[0].set_yticks(y_pos_same)
+        axes[0].set_yticklabels(same_type['cell_type_pair'])
+        axes[0].set_title('Same Cell Type Pairs (Homotypic Proximity)', fontsize=14, pad=20)
+        axes[0].axvline(x=0, color='black', linestyle='-', linewidth=1)
+        axes[0].grid(True, alpha=0.3)
+        
+        # Add significance annotations
+        for i, (idx, row) in enumerate(same_type.iterrows()):
+            x_pos = row['log_fold_change']
+            ha_align = 'left' if x_pos > 0 else 'right'
+            x_offset = 0.05 if x_pos > 0 else -0.05
+            
+            if row['p_value'] < 0.001:
+                axes[0].text(x_pos + x_offset, i, '***', ha=ha_align, va='center', fontweight='bold')
+            elif row['p_value'] < 0.01:
+                axes[0].text(x_pos + x_offset, i, '**', ha=ha_align, va='center', fontweight='bold')
+            elif row['p_value'] < 0.05:
+                axes[0].text(x_pos + x_offset, i, '*', ha=ha_align, va='center', fontweight='bold')
+    else:
+        axes[0].text(0.5, 0.5, 'No same type pairs found', ha='center', va='center', transform=axes[0].transAxes)
+        axes[0].set_title('Same Cell Type Pairs (Homotypic Proximity)', fontsize=14, pad=20)
+    
+    # Different cell type pairs
+    if len(diff_type) > 0:
+        colors_diff = ['blue' if p < 0.05 else 'lightblue' for p in diff_type['p_value']]
+        y_pos_diff = np.arange(len(diff_type))
+        
+        bars2 = axes[1].barh(y_pos_diff, diff_type['log_fold_change'], color=colors_diff, alpha=0.8)
+        axes[1].set_yticks(y_pos_diff)
+        axes[1].set_yticklabels(diff_type['cell_type_pair'])
+        axes[1].set_title('Different Cell Type Pairs (Heterotypic Proximity)', fontsize=14, pad=20)
+        axes[1].axvline(x=0, color='black', linestyle='-', linewidth=1)
+        axes[1].grid(True, alpha=0.3)
+        
+        # Add significance annotations
+        for i, (idx, row) in enumerate(diff_type.iterrows()):
+            x_pos = row['log_fold_change']
+            ha_align = 'left' if x_pos > 0 else 'right'
+            x_offset = 0.05 if x_pos > 0 else -0.05
+            
+            if row['p_value'] < 0.001:
+                axes[1].text(x_pos + x_offset, i, '***', ha=ha_align, va='center', fontweight='bold')
+            elif row['p_value'] < 0.01:
+                axes[1].text(x_pos + x_offset, i, '**', ha=ha_align, va='center', fontweight='bold')
+            elif row['p_value'] < 0.05:
+                axes[1].text(x_pos + x_offset, i, '*', ha=ha_align, va='center', fontweight='bold')
+    else:
+        axes[1].text(0.5, 0.5, 'No different type pairs found', ha='center', va='center', transform=axes[1].transAxes)
+        axes[1].set_title('Different Cell Type Pairs (Heterotypic Proximity)', fontsize=14, pad=20)
+    
+    # X-axis label
+    axes[1].set_xlabel('Log2 Fold Change\n← Segregation Tendency    Proximity Tendency →', fontsize=12)
+    
+    plt.tight_layout()
+    
+    # Save figure if path provided
+    if save_path:
+        filename = f"{sample_name}_cell_type_neighbor_proximity_barplot.png"
+        filepath = os.path.join(save_path, filename)
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        print(f"Figure saved: {filepath}")
+    
+    plt.show()
+    
+    return fig
+
+def display_results_table(results_df, save_path=None, sample_name="sample"):
+    """
+    Display and save results table
+    """
+    # Format results for display
+    display_df = results_df.copy()
+    display_df['log_fold_change'] = display_df['log_fold_change'].round(3)
+    display_df['p_value'] = display_df['p_value'].round(4)
+    display_df['expected_count'] = display_df['expected_count'].round(1)
+    
+    print("\n=== Statistical Analysis Results ===")
+    print(display_df[['cell_type_pair', 'observed_count', 'expected_count', 
+                     'log_fold_change', 'p_value', 'significant']].to_string(index=False))
+    
+    significant_count = sum(display_df['significant'])
+    proximal_count = sum((display_df['log_fold_change'] > 0) & display_df['significant'])
+    segregated_count = sum((display_df['log_fold_change'] < 0) & display_df['significant'])
+    
+    print(f"\nSignificant proximity patterns (p < 0.05): {significant_count}")
+    print(f"Significantly proximal pairs: {proximal_count}")
+    print(f"Significantly segregated pairs: {segregated_count}")
+    
+    # Save table if path provided
+    if save_path:
+        filename = f"{sample_name}_cell_type_neighbor_proximity_results.csv"
+        filepath = os.path.join(save_path, filename)
+        results_df.to_csv(filepath, index=False)
+        print(f"Results table saved: {filepath}")
+    
+    return display_df
+
+def analyze_cell_proximity(df, n_permutations=1000, random_seed=42, 
+                         save_path=None, sample_name="sample", exclude_self=True):
+    print("Starting cell proximity statistical analysis...")
+    print(f"Original data shape: {df.shape}")
+    
+    # Filter out self-proximity if requested
+    if exclude_self:
+        original_count = len(df)
+        df_filtered = df[df['cell1'] != df['cell2']].copy()
+        excluded_count = original_count - len(df_filtered)
+        print(f"Excluded {excluded_count} self-proximity entries")
+        print(f"Filtered data shape: {df_filtered.shape}")
+        df = df_filtered
+    
+    # Run optimized permutation test
+    observed_proximities, permuted_proximities = permutation_test_optimized(df, n_permutations, random_seed)
+    
+    # Calculate statistics
+    results_df = calculate_statistics(observed_proximities, permuted_proximities)
+    
+    # Display and save results
+    display_df = display_results_table(results_df, save_path, sample_name)
+    
+    # Create and save visualization
+    fig = create_horizontal_barplot(results_df, save_path, sample_name)
+    
+    if save_path:
+        print(f"\nAll files saved to: {save_path}")
+    
+    return results_df, fig

@@ -378,9 +378,7 @@ def calculate_coexpression_coactivity_cluster(edge_df, center_adata, exp_data, e
     sender_agg = temp_df.groupby(groupby_cols, observed=False)[sender_cols].sum()
     coexp_agg = temp_df.groupby(groupby_cols, observed=False)[coexp_cols].sum()
     
-    # Convert to long format efficiently
-    print("Converting to long format...")
-    
+    # Convert to long format efficiently    
     results_list = []
     for (cell1_type, cell2_type), sender_row in sender_agg.iterrows():
         coexp_row = coexp_agg.loc[(cell1_type, cell2_type)]
