@@ -2,7 +2,7 @@
 ## Cell-cell interaction prediction model for Visium HD spatial transcriptome platform
 HueTracer is software for analyzing cell-cell interactions at single-cell resolution using Visium HD. It identifies cell positions using the Bin2Cell algorithm. It performs cell typing using label transfer from cell annotations in single-cell analysis or by combining Visium HD tissue images with gene expression profiles. It performs microenvironment clustering based on the expression patterns of cells surrounding each cell. It identifies cell-cell interactions using the NicheNet database.  
   
-HueTracer is a software program created as a follow-up to [DeepCOLOR](https://github.com/kojikoji/deepcolor) software.  
+HueTracer is a software program created as a follow-up to [DeepCOLOR](https://github.com/kojikoji/deepcolor) software, which has some [programming error](https://github.com/kojikoji/deepcolor/issues/3).  
 
 
 ## Instalation
