@@ -10,6 +10,7 @@ src/huetracer/selection.py
 src/huetracer/statistics.py
 src/huetracer/transfer.py
 src/huetracer/vae.py
+src/huetracer/widget.py
 src/huetracer.egg-info/PKG-INFO
 src/huetracer.egg-info/SOURCES.txt
 src/huetracer.egg-info/dependency_links.txt
