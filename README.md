@@ -13,7 +13,8 @@ pip install huetracer
 
 ## Docker (now constructing)
 ```shell
-# at directory with Dockerfile
+# run at directory with Dockerfile
+# run only once
 docker build -t huetracer-env .
 
 # In proxy environment, check proxy.server:port
@@ -23,6 +24,8 @@ docker build -t huetracer-env .
 #   --build-arg https_proxy=http://gw.xxx.jp:8080 \
 #   -t huetracer-env .
 
+# run at upstream directory of 10x data files
+# /app is the working directory
 docker run --gpus all -it -p 8152:8152 -v $(pwd):/app huetracer-env
 ```
 ## Usage
