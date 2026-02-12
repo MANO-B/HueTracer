@@ -11,6 +11,20 @@ You can install HueTracer using pip command from your shell.
 pip install huetracer
 ```
 
+## Docker (now constructing)
+```shell
+# at directory with Dockerfile
+docker build -t huetracer-env .
+
+# In proxy environment, check proxy.server:port
+# example
+# docker build \                 
+#   --build-arg http_proxy=http://gw.xxx.jp:8080 \
+#   --build-arg https_proxy=http://gw.xxx.jp:8080 \
+#   -t huetracer-env .
+
+docker run --gpus all -it -p 8152:8152 -v $(pwd):/app huetracer-env
+```
 ## Usage
 You need to prepare Visium HD spatial transcriptome data generated with SpaceRanger program by 10X. You can see the usage as follows.
 
