@@ -27,6 +27,18 @@ docker build -t huetracer-env .
 # run at upstream directory of 10x data files
 # /app is the working directory
 docker run --gpus all -it -p 8152:8152 -v $(pwd):/app huetracer-env
+
+# In proxy environment, check proxy.server:port
+docker run -it \
+  --gpus all \
+  -p 8152:8152 \
+  -v ~/LLM:/app \
+  -e http_proxy=http://gw.ncc.go.jp:8080 \
+  -e https_proxy=http://gw.ncc.go.jp:8080 \
+  -e no_proxy="localhost,127.0.0.1,0.0.0.0" \
+  --name qwen-lab \
+  qwen-analysis-lab bash
+
 ```
 ## Usage
 You need to prepare Visium HD spatial transcriptome data generated with SpaceRanger program by 10X. You can see the usage as follows.
