@@ -1199,38 +1199,45 @@ def analyze_cell_proximity(df, n_permutations=1000, random_seed=42,
 class ClusterNamer:
     """
     An interactive widget for naming spatial clusters in Jupyter environments.
-
-    This tool displays a spatial plot of clustered cells over a histology image
-    and provides a user interface to assign meaningful names to each cluster ID.
-    The annotations can then be saved back to the AnnData object.
+    Fixes coordinate alignment issues while preserving the Pan/Zoom UI.
     """
-    def __init__(self, adata, cluster_key='leiden', image_key='hires', save_key='predicted_cell_type'):
-        """
-        Initializes the naming widget.
-
-        Parameters
-        ----------
-        adata : AnnData
-            The annotated data object containing spatial information.
-        cluster_key : str
-            The column in `adata.obs` that contains the cluster labels (e.g., 'leiden').
-        image_key : str
-            The key for the histology image in `adata.uns['spatial'][lib_id]['images']`.
-        save_key : str
-            The new column name in `adata.obs` where the annotations will be saved.
-        """
+    def __init__(self, adata, cluster_key='leiden', 
+                 image_key="0.5_mpp_150_buffer", 
+                 basis_key="spatial_cropped_150_buffer", # ★修正: 引数追加
+                 save_key='predicted_cell_type'):
+        
         # --- 1. Data Initialization ---
         self.adata_ref = adata
         self.cluster_key = cluster_key
         self.save_key = save_key
         self.pan_offset = [0, 0] # [x_offset, y_offset]
 
-        # --- 2. Load Spatial Data ---
+        # --- 2. Load Spatial Data (★修正: 位置ズレ修正ロジック) ---
         try:
             lib_id = list(self.adata_ref.uns['spatial'].keys())[0]
-            self.image = self.adata_ref.uns['spatial'][lib_id]['images'][image_key]
-            scale_factor = self.adata_ref.uns['spatial'][lib_id]['scalefactors'][f'tissue_{image_key}_scalef']
-            self.coords = self.adata_ref.obsm['spatial'] * scale_factor
+            
+            # 画像の読み込み（エラーハンドリング付き）
+            if image_key not in self.adata_ref.uns['spatial'][lib_id]['images']:
+                print(f"⚠️ Image key '{image_key}' not found. Using 'hires'.")
+                self.image = self.adata_ref.uns['spatial'][lib_id]['images']['hires']
+                scale_key = "tissue_hires_scalef"
+            else:
+                self.image = self.adata_ref.uns['spatial'][lib_id]['images'][image_key]
+                scale_key = f"tissue_{image_key}_scalef"
+
+            # スケールファクターの取得
+            scale_factor = self.adata_ref.uns['spatial'][lib_id]['scalefactors'].get(scale_key, 1.0)
+            
+            # ★重要: 正しい座標系(basis_key)からデータを取得
+            if basis_key in self.adata_ref.obsm:
+                coords_raw = self.adata_ref.obsm[basis_key]
+            else:
+                print(f"⚠️ Basis '{basis_key}' not found. Using 'spatial' (May cause shifts).")
+                coords_raw = self.adata_ref.obsm['spatial']
+
+            # スケーリング適用
+            self.coords = coords_raw * scale_factor
+
         except Exception as e:
             print(f"🛑 Error loading spatial data: {e}")
             return
@@ -1264,7 +1271,7 @@ class ClusterNamer:
         self.text_inputs = {}
         for c in self.clusters:
             default_value = existing_annotations.get(c, "")
-            if default_value == 'Unannotated':
+            if str(default_value) == 'nan' or default_value == 'Unannotated':
                 default_value = ""
             self.text_inputs[c] = widgets.Text(value=default_value, description=f"Cluster {c}:", placeholder="e.g., Tumor cells", layout=widgets.Layout(width='flex'))
         
@@ -1312,45 +1319,57 @@ class ClusterNamer:
     def create_plot(self):
         """Creates and renders the matplotlib plot."""
         with self.output:
-            clear_output(wait=True)
-            self.fig, self.ax = plt.subplots(figsize=(8, 8))
-            self.img_artist = self.ax.imshow(self.image, alpha=self.opacity_slider.value)
+            if self.fig is None:
+                self.fig, self.ax = plt.subplots(figsize=(8, 8))
+            else:
+                self.ax.clear()
+
+            h, w = self.image.shape[:2]
+            
+            # ★修正: extentを指定して画像座標を明確にする
+            self.img_artist = self.ax.imshow(self.image, alpha=self.opacity_slider.value, extent=[0, w, h, 0], origin='upper')
 
             for cluster in self.clusters:
                 is_visible = self.visibility_checkboxes[cluster].value
-                mask = self.adata_ref.obs[self.cluster_key].astype(str) == cluster
-                cluster_coords = self.coords[mask]
-                
-                # ✅ FIX: Use column 0 for X, 1 for Y to fix rotation.
-                scatter = self.ax.scatter(
-                    cluster_coords[:, 0],  # X coordinate
-                    cluster_coords[:, 1],  # Y coordinate
-                    s=self.point_size_slider.value,
-                    color=self.color_map[cluster],
-                    label=f"Cluster {cluster}",
-                    rasterized=True, visible=is_visible, alpha=self.point_opacity_slider.value
-                )
-                self.scatter_plots[cluster] = scatter
+                if is_visible:
+                    mask = self.adata_ref.obs[self.cluster_key].astype(str) == cluster
+                    cluster_coords = self.coords[mask]
+                    
+                    if len(cluster_coords) > 0:
+                        self.ax.scatter(
+                            cluster_coords[:, 0],  # X coordinate
+                            cluster_coords[:, 1],  # Y coordinate
+                            s=self.point_size_slider.value,
+                            color=self.color_map[cluster],
+                            label=f"Cluster {cluster}",
+                            rasterized=True, 
+                            alpha=self.point_opacity_slider.value,
+                            linewidths=0
+                        )
             
+            # View Settings
+            self.ax.set_xlim(0, w)
+            self.ax.set_ylim(h, 0) # 画像座標系に合わせて反転
             self.ax.set_title(f"Spatial Plot of '{self.cluster_key}'")
-            self.ax.set_xticks([])
-            self.ax.set_yticks([])
-            self.ax.invert_yaxis() # Invert y-axis to match image coordinate system
+            self.ax.axis('off')
+            
             self.update_view()
             plt.tight_layout()
-            plt.show()
+            display(self.fig)
     
     def update_view(self):
         """Updates the plot's zoom and pan."""
         if not self.ax: return
-        h, w, _ = self.image.shape
+        h, w = self.image.shape[:2]
         zoom = self.zoom_slider.value
         
         view_w, view_h = w / zoom, h / zoom
-        center_x, center_y = w / 2 + self.pan_offset[0], h / 2 + self.pan_offset[1]
+        
+        # Panボタンの動作を反転させないよう調整
+        center_x = (w / 2) + (self.pan_offset[0] * (w/zoom) * 0.2)
+        center_y = (h / 2) + (self.pan_offset[1] * (h/zoom) * 0.2)
         
         self.ax.set_xlim(center_x - view_w / 2, center_x + view_w / 2)
-        # Y-limits are inverted because the axis is inverted
         self.ax.set_ylim(center_y + view_h / 2, center_y - view_h / 2)
         
         if self.fig: self.fig.canvas.draw_idle()
@@ -1362,70 +1381,57 @@ class ClusterNamer:
             self.status_label.value = "<b>Status:</b> ⚠️ No names entered."
             return
 
-        series = self.adata_ref.obs[self.cluster_key].astype(str).map(annotation_map).fillna('Unannotated').astype('category')
+        # マッピングを適用（入力がない場合は元のクラスタIDを使用）
+        full_mapping = {c: annotation_map.get(c, c) for c in self.clusters}
+        
+        series = self.adata_ref.obs[self.cluster_key].astype(str).map(full_mapping).astype('category')
         self.adata_ref.obs[self.save_key] = series
+        
+        # scvi_predicted_labels も更新
         self.adata_ref.obs['scvi_predicted_labels'] = series
         
-        self.status_label.value = f"<b>Status:</b> ✅ Saved to `obs['{self.save_key}']` & `obs['scvi_predicted_labels']`"
+        self.status_label.value = f"<b>Status:</b> ✅ Saved to `obs['{self.save_key}']`"
         print("--- Annotation Summary ---\n", self.adata_ref.obs[self.save_key].value_counts())
         
     def on_reset_clicked(self, b):
         """Resets names, view, and redraws the plot."""
-        for text_input in self.text_inputs.values(): text_input.value = ""
-        self.status_label.value = "<b>Status:</b> Cleared names and reset view."
         self.zoom_slider.value = 1.0
         self.pan_offset = [0, 0]
         self.create_plot()
 
     def on_visibility_change(self, change):
-        """Redraws the plot when a visibility checkbox changes."""
         self.create_plot()
         self.status_label.value = "<b>Status:</b> Plot updated."
     
     def on_select_all_clicked(self, b):
-        """Callback for the 'Select All' button."""
-        # ✅ FIX: Unobserve to prevent multiple redraws
         for cb in self.visibility_checkboxes.values():
             cb.unobserve(self.on_visibility_change, names='value')
-        
         for cb in self.visibility_checkboxes.values():
             cb.value = True
-        
-        # Re-observe
         for cb in self.visibility_checkboxes.values():
             cb.observe(self.on_visibility_change, names='value')
-        
         self.create_plot()
 
     def on_deselect_all_clicked(self, b):
-        """Callback for the 'Deselect All' button."""
-        # ✅ FIX: Unobserve to prevent multiple redraws
         for cb in self.visibility_checkboxes.values():
             cb.unobserve(self.on_visibility_change, names='value')
-        
         for cb in self.visibility_checkboxes.values():
             cb.value = False
-        
-        # Re-observe
         for cb in self.visibility_checkboxes.values():
             cb.observe(self.on_visibility_change, names='value')
-
         self.create_plot()
 
     def on_interactive_update(self, change):
-        """Redraws the plot for any interactive widget change."""
+        self.output.clear_output(wait=True)
         self.create_plot()
         
     def on_pan(self, b):
         """Callback for panning buttons."""
-        h, w, _ = self.image.shape
-        pan_step = (w / self.zoom_slider.value) * 0.2
-        
-        if b.icon == 'arrow-up': self.pan_offset[1] -= pan_step
-        elif b.icon == 'arrow-down': self.pan_offset[1] += pan_step
-        elif b.icon == 'arrow-left': self.pan_offset[0] -= pan_step
-        elif b.icon == 'arrow-right': self.pan_offset[0] += pan_step
-        self.create_plot() # Redraw to apply pan
+        if b.icon == 'arrow-up': self.pan_offset[1] -= 1
+        elif b.icon == 'arrow-down': self.pan_offset[1] += 1
+        elif b.icon == 'arrow-left': self.pan_offset[0] -= 1
+        elif b.icon == 'arrow-right': self.pan_offset[0] += 1
+        self.update_view()
 
     def run(self):
         """Assembles the UI and plot, then displays the widget."""
@@ -1459,14 +1465,19 @@ class ClusterNamer:
         display(widgets.HBox([control_panel, self.output]))
         self.create_plot()
 
-def name_clusters_interactively(adata, cluster_key='leiden', image_key='hires', save_key='predicted_cell_type'):
+def name_clusters_interactively(adata, cluster_key='leiden', 
+                                image_key="0.5_mpp_150_buffer", 
+                                basis_key="spatial_cropped_150_buffer", # 追加: クロップ座標を指定
+                                save_key='predicted_cell_type'):
     """
-    Launches the interactive cluster naming widget for a spatial AnnData object.
+    Launches the interactive cluster naming widget using crop-aligned coordinates.
     """
-    widget = ClusterNamer(adata=adata, cluster_key=cluster_key, image_key=image_key, save_key=save_key)
+    widget = ClusterNamer(adata=adata, cluster_key=cluster_key, 
+                          image_key=image_key, basis_key=basis_key, 
+                          save_key=save_key)
     widget.run()
     return widget
-
+    
 class SpatialExpressionVisualizer:
     """
     Interactive visualization tool for spatial gene expression analysis

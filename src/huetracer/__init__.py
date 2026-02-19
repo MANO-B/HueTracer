@@ -4,5 +4,5 @@ from .harmony import run_harmony
 from .plot import plot_all_cell_type_highlights, plot_all_clusters_highlights, plot_gene_cci_and_sankey, analyze_cell_proximity
 from .cci import make_coexp_cc_df, make_non_zero_values, make_positive_values, make_top_values, safe_toarray, add_zscore_layers, construct_microenvironment_data, prepare_microenv_data, calculate_enhanced_coexpression_coactivity, calculate_enhanced_coexpression_coactivity_cluster, comprehensive_interaction_analysis, calculate_cumulative_ligand_coexpression_analysis, run_cumulative_analysis_with_clusters
 from .selection import LassoCellSelectorMicroenvironment, lasso_selection_microenvironment, LassoCellSelectorCellType, lasso_selection_cell_type
-from .transfer import SCVILabelTransfer, run_scvi_label_transfer, analyze_predictions
+from .transfer import SCVILabelTransfer, run_scvi_label_transfer, analyze_predictions, create_confusion_matrix, create_spatial_plot, create_hires_overlay_plot
 from .widget import SpatialGeneExpressionViewer, VolcanoPlotter

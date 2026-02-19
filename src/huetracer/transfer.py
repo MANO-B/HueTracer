@@ -380,33 +380,50 @@ def analyze_predictions(sp_adata: sc.AnnData,
     # Dendrogram and differential gene expression analysis
     sc.tl.dendrogram(sp_adata_predicted, groupby=prediction_key)
     sc.tl.rank_genes_groups(sp_adata_predicted, prediction_key, method='wilcoxon', use_raw=False)
-    
-    # Display heatmap
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        sc.pl.rank_genes_groups_heatmap(sp_adata_predicted, show_gene_labels=True, use_raw=False)
-    
-    # Create and display confusion matrix
-    create_confusion_matrix(sp_adata, cluster_key, prediction_key)
-    
+        
     return sp_adata_predicted
 
 def create_confusion_matrix(sp_adata: sc.AnnData, 
-                            cluster_key: str,
-                            prediction_key: str) -> None:
+                            cluster_key: str = "leiden_nucleus",
+                            prediction_key: str = "predicted_cell_type") -> None:
     """Create and visualize confusion matrix"""
     
+    # データの集計とパーセンテージ計算
     conf_matrix = pd.crosstab(sp_adata.obs[cluster_key], sp_adata.obs[prediction_key])
-    conf_matrix_pct = conf_matrix.div(conf_matrix.sum(axis=1), axis=0)
+    conf_matrix_pct = conf_matrix.div(conf_matrix.sum(axis=1), axis=0) * 100
     
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(conf_matrix_pct, annot=True, fmt=".2f", cmap="viridis", linewidths=0,
-            rasterized=True, cbar=True, cbar_kws={'label': 'Proportion'})
+    plt.figure(figsize=(14, 10))
+    
+    # ヒートマップの描画 (戻り値 ax を受け取る)
+    ax = sns.heatmap(conf_matrix_pct, 
+                     annot=True, 
+                     fmt=".1f", 
+                     cmap="viridis", 
+                     linewidths=0,
+                     annot_kws={"size": 7}, # ヒートマップ内の数字のサイズ
+                     rasterized=True, 
+                     cbar=True) # ここではラベルを設定せず、後でサイズ付きで設定する
+    
     plt.grid(False)
-    plt.xlabel("Predicted Cell Type")
-    plt.ylabel("Leiden Cluster")
-    plt.title("Confusion Matrix (Row-normalized)")
-    plt.xticks(rotation=45, ha='right')
+    
+    # --- フォントサイズの調整箇所 ---
+    
+    # 軸タイトルのフォントサイズ (fontsize=10)
+    plt.xlabel("Predicted Cell Type", fontsize=10)
+    plt.ylabel("Leiden Cluster", fontsize=10)
+    
+    # グラフタイトルのフォントサイズ (fontsize=12)
+    plt.title("Confusion Matrix (Row-normalized %)", fontsize=12)
+    
+    # 軸目盛りのフォントサイズ (fontsize=8)
+    plt.xticks(fontsize=8, rotation=45, ha='right')
+    plt.yticks(fontsize=8)
+    
+    # カラーバー（凡例）のフォントサイズ調整
+    cbar = ax.collections[0].colorbar
+    cbar.set_label('Proportion (%)', fontsize=10) # カラーバーのタイトルサイズ
+    cbar.ax.tick_params(labelsize=8)              # カラーバーの目盛りサイズ
+    
     plt.tight_layout()
     plt.show()
 
@@ -420,36 +437,62 @@ def create_spatial_plot(sp_adata: sc.AnnData,
     # Basic spatial plot
     sc.pl.spatial(sp_adata, color=color_key,
                   title='Cell Type Annotation (scANVI)', 
-                  size=20, img_key='hires', legend_fontsize=8,
+                  size=20, legend_fontsize=8,
+                  img_key="0.5_mpp_150_buffer",
+                  basis="spatial_cropped_150_buffer",
                   spot_size=1, frameon=False)
-    
-    # High-resolution overlay plot
-    create_hires_overlay_plot(sp_adata, lib_id, sample_name, save_path, color_key)
 
 def create_hires_overlay_plot(sp_adata: sc.AnnData,
                               lib_id: str, 
                               sample_name: str,
                               save_path: str,
-                              color_key: str = "predicted_cell_type") -> None:
-    """Create high-resolution overlay plot"""
+                              file_name: str = "spatial_overlay_scANVI",
+                              color_key: str = "predicted_cell_type",
+                              img_key: str = "0.5_mpp_150_buffer", # クロップ画像のキー
+                              TITLE: str = "Cell type",
+                              basis: str = "spatial_cropped_150_buffer") -> None: # クロップ座標のキー
+    """Create high-resolution overlay plot aligned with crop"""
     
-    # Coordinate calculation
-    sf_hires = sp_adata.uns["spatial"][lib_id]["scalefactors"]["tissue_hires_scalef"]
-    xy = (pd.DataFrame(sp_adata.obsm["spatial"] * sf_hires, 
+    # 1. 画像データの取得
+    # 登録されていない場合はエラーを出さずに確認
+    if img_key not in sp_adata.uns["spatial"][lib_id]["images"]:
+        print(f"⚠️ Image key '{img_key}' not found. Using 'hires' instead.")
+        img_key = "hires"
+        scale_key = "tissue_hires_scalef"
+    else:
+        # クロップ画像用のスケールファクターキーを構築
+        scale_key = f"tissue_{img_key}_scalef"
+
+    hires_img = sp_adata.uns["spatial"][lib_id]["images"][img_key]
+    
+    # 2. 座標計算 (Coordinate calculation)
+    # クロップ専用のスケールファクターを取得 (なければ 1.0)
+    sf = sp_adata.uns["spatial"][lib_id]["scalefactors"].get(scale_key, 1.0)
+    
+    # 指定された basis (例: spatial_cropped...) の座標を取得し、スケール補正
+    # 注: bin2cellなどで座標が既に画像ピクセルに合っている場合、sfは1.0になっているはずです
+    coords_raw = sp_adata.obsm[basis]
+    
+    xy = (pd.DataFrame(coords_raw * sf, 
                        columns=["x", "y"], 
                        index=sp_adata.obs_names)
-          .join(sp_adata.obs["object_id"])
+          .join(sp_adata.obs["object_id"]) # マージ用にIDを結合
           .reset_index()
           .rename(columns={"index": "cell_id"}))
     
+    # 3. データ結合
     merged = xy.merge(sp_adata.obs, on="object_id", how="inner")
+    
+    # プロット用にカテゴリ型を文字列に変換してクリーンアップ
     merged["group"] = merged[color_key].astype(str).str.strip()
     
-    # Set colors and markers
-    group_order = sorted(merged["group"].dropna().unique())
-    markers = ['o', 's', 'D', '^', 'v', '<', '>', 'p', '*', 'X', 'P', 'H', '8', 'd', '|']
+    # --- 以下、描画ロジック ---
     
-    # Select color palette (based on number of groups)
+    # グループとマーカーの設定
+    group_order = sorted(merged["group"].dropna().unique())
+    markers = ['o', 's', 'D', '^', 'v', '<', '>', 'p', '*', 'X', 'P', 'H', '8', 'd']
+    
+    # 色パレットの選択
     if len(group_order) <= 10:
         palette = sns.color_palette("tab10", n_colors=len(group_order))
     elif len(group_order) <= 20:
@@ -461,40 +504,46 @@ def create_hires_overlay_plot(sp_adata: sc.AnnData,
     marker_cycle = cycle(markers)
     marker_map = {group: next(marker_cycle) for group in group_order}
     
-    # Create plot
-    hires_img = sp_adata.uns["spatial"][lib_id]["images"]["hires"]
+    # Plot作成
     h, w = hires_img.shape[:2]
-    
     fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
-    ax.imshow(hires_img, extent=[0, w, h, 0])
     
-    # Plot each group individually
+    # 画像の表示 (extentを指定して座標系をピクセルに合わせる)
+    ax.imshow(hires_img, extent=[0, w, h, 0], origin='upper')
+    
+    # 各グループを散布図として重ねる
     for group in group_order:
         data_sub = merged[merged["group"] == group]
         ax.scatter(data_sub["x"], data_sub["y"],
-                   c=[color_map[group]], marker=marker_map[group],
-                   s=1.0, alpha=0.7, label=group,
-                   linewidths=0, rasterized=True)
+                   c=[color_map[group]], 
+                   marker=marker_map[group],
+                   s=2.0, # スポットサイズ調整
+                   alpha=0.8, 
+                   label=group,
+                   linewidths=0, 
+                   rasterized=True)
     
-    ax.invert_yaxis()
+    # 軸設定
+    # ax.invert_yaxis() # 画像座標系(左上0,0)の場合は通常不要。もし上下逆なら有効化してください。
     ax.set_axis_off()
     
-    # Improve legend
+    # 凡例の設定 (少し位置を調整)
     legend = ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left",
-                       title="Cell Type", markerscale=10, 
+                       title=TITLE, markerscale=5, 
                        frameon=True, fancybox=True, shadow=True,
                        fontsize=8, title_fontsize=10)
     legend.get_frame().set_facecolor('white')
     legend.get_frame().set_alpha(0.9)
     
-    # Save
-    filename = f"{sample_name}_spatial_overlay_scANVI.pdf"
+    # 保存
+    filename = f"{sample_name}_{file_name}.pdf"
     out_pdf = os.path.join(save_path, filename)
     os.makedirs(save_path, exist_ok=True)
     fig.savefig(out_pdf, format="pdf", dpi=300, bbox_inches="tight")
+    plt.show()
+    print(f"💾 Saving the figuer to {out_pdf}...")
     plt.close(fig)
-    
-    logger.info(f"High-resolution plot saved: {out_pdf}")
+    print("Done! Go ahead.")
 
 # Main execution example
 def run_scvi_label_transfer(filtered_sc_adata: sc.AnnData,
@@ -568,14 +617,11 @@ def run_scvi_label_transfer(filtered_sc_adata: sc.AnnData,
         # 5. Analyze results
         sp_adata_predicted = analyze_predictions(sp_adata)
         
-        # 6. Visualize
-        create_spatial_plot(sp_adata, lib_id, sample_name, save_path_for_today)
-        
-        # 7. Save results
+        # 6. Save results
         sp_adata_predicted.write_h5ad(h5ad_predicted_full_save_path)
         logger.info(f"Results saved: {h5ad_predicted_full_save_path}")
         
-        # 8. Quality assessment report
+        # 7. Quality assessment report
         generate_quality_report(sp_adata_predicted, save_path_for_today, sample_name)
         
         return sp_adata_predicted
@@ -613,10 +659,11 @@ def generate_quality_report(sp_adata: sc.AnnData,
             f.write(f"   - Ratio of low-confidence cells (<0.5): {low_conf_ratio:.1%}\n")
         
         # Cell type-specific statistics
+        print(f"💾 Saving the figuer to {out_pdf}...")
         f.write(f"\n3. Cell Type Distribution\n")
         type_counts = sp_adata.obs['predicted_cell_type'].value_counts()
         for cell_type, count in type_counts.items():
             ratio = count / sp_adata.n_obs
             f.write(f"   - {cell_type}: {count:,} ({ratio:.1%})\n")
-    
+        print("Done! Go ahead.")
     logger.info(f"Quality report saved: {report_path}")

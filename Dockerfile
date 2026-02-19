@@ -1,60 +1,83 @@
-# Use NVIDIA CUDA 11.8 with cuDNN 8 as the base image
-FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
-# Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    python3-pip \
-    python3-dev \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    git \
-    wget \
-    build-essential \
+# TFログ抑制（任意）
+ENV TF_CPP_MIN_LOG_LEVEL=3
+ENV TF_ENABLE_ONEDNN_OPTS=1
+
+# Cache場所を固定（モデル事前DL用）
+ENV HOME=/root
+ENV XDG_CACHE_HOME=/opt/cache
+ENV CSBDEEP_CACHE_DIR=/opt/models/csbdeep
+ENV KERAS_HOME=/opt/models/keras
+ENV NVCC_PREPEND_FLAGS="--std=c++17"
+ENV CCCL_IGNORE_DEPRECATED_CPP_DIALECT=1
+
+# 日本ミラー（任意）
+RUN sed -i 's@http://archive.ubuntu.com@http://ftp.riken.jp/Linux@g' /etc/apt/sources.list && \
+    sed -i 's@http://security.ubuntu.com@http://ftp.riken.jp/Linux@g' /etc/apt/sources.list
+
+# OS deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev \
+    git wget build-essential \
+    libgl1 libglib2.0-0 \
+    nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip and set alias
-RUN pip3 install --no-cache-dir --upgrade pip
+RUN python3 -m pip install --no-cache-dir -U pip setuptools wheel
 
-# Install PyTorch (Compatible with CUDA 11.8)
-RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# ---- numpy/scipy + tensorflow ----
+RUN python3 -m pip install --no-cache-dir --only-binary=:all: \
+      "numpy==1.26.4" "scipy==1.15.3" && \
+    python3 -m pip install --no-cache-dir \
+      "tensorflow==2.20.0"
 
-# Install TensorFlow (Required by bin2cell, older version for 2022 compatibility)
-# TensorFlow 2.11 or 2.12 supports CUDA 11.8
-RUN pip3 install --no-cache-dir "tensorflow<2.13"
+# ---- 解析ライブラリ ----
+RUN python3 -m pip install --no-cache-dir \
+    scanpy scvi-tools bin2cell stardist csbdeep seaborn \
+    adjustText gdown plotly scikit-learn opencv-python \
+    zarr imagecodecs tifffile
 
-# Install core analysis libraries
-RUN pip3 install --no-cache-dir \
-    scanpy \
-    scvi-tools \
-    bin2cell \
-    seaborn \
-    adjustText \
-    gdown \
-    plotly \
-    scipy \
-    scikit-learn \
-    opencv-python
+# ---- Jupyter + huetracer ----
+RUN python3 -m pip install --no-cache-dir \
+    jupyterlab ipywidgets ipympl jupyterlab-widgets huetracer
 
-# Install Jupyter and Widgets for GUI support
-RUN pip3 install --no-cache-dir \
-    jupyterlab \
-    ipywidgets \
-    ipympl
+# ---- TorchはGPU（CUDA 12.8）----
+RUN python3 -m pip install --no-cache-dir \
+    torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu128
 
-# Install your package: huetracer
-# Since it's in development, we install from the provided setup.py requirements
-# or directly from pip if available.
-RUN pip3 install --no-cache-dir huetracer
+# ---- Pre-download StarDist pretrained model ----
+RUN mkdir -p /opt/models/csbdeep /opt/models/keras /opt/cache && \
+    python3 - <<'PY'
+from stardist.models import StarDist2D
+m = StarDist2D.from_pretrained("2D_versatile_he")
+print("✅ cached:", m.name)
+m = StarDist2D.from_pretrained("2D_versatile_fluo")
+print("✅ cached:", m.name)
+PY
 
-# Set the working directory
+RUN python3 -m pip install --no-cache-dir \
+    adjustText json igraph leidenalg datatable infercnvpy cupy-cuda13x
+
+RUN git clone https://github.com/digitalcytometry/cytotrace2
+RUN cd cytotrace2/cytotrace2_python
+RUN pip install .
+
+# RAPIDS (pip) from NVIDIA index
+RUN python3 -m pip install \
+    --extra-index-url=https://pypi.nvidia.com \
+    "cudf-cu13==26.2.*" \
+    "dask-cudf-cu13==26.2.*" \
+    "cuml-cu13==26.2.*" \
+    "cugraph-cu13==26.2.*"
+
+# 依存が崩れてないか最終チェック
+RUN python3 -m pip check
+
 WORKDIR /app
-
-# Expose Jupyter port
 EXPOSE 8152
-
-# Default command: launch jupyter lab
 CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8152", "--no-browser", "--allow-root", "--NotebookApp.token=''"]

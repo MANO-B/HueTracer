@@ -21,7 +21,7 @@ class LassoCellSelectorMicroenvironment:
         self.current_clusters = clusters.copy()
         
         # Image data
-        self.hires_img = sp_adata.uns["spatial"][lib_id]["images"]["hires"]
+        self.hires_img = sp_adata.uns["spatial"][lib_id]["images"]["0.5_mpp_150_buffer"]
         self.h, self.w = self.hires_img.shape[:2]
         
         # Group information
@@ -579,7 +579,6 @@ class LassoCellSelectorMicroenvironment:
             with self.output:
                 print(f"\n❌ Error: {e}")
 
-
 # Usage function
 def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters):
     selector = LassoCellSelectorMicroenvironment(
@@ -605,7 +604,7 @@ class LassoCellSelectorCellType:
         plt.rcParams['figure.max_open_warning'] = 50
         
         # Image data
-        self.hires_img = sp_adata.uns["spatial"][lib_id]["images"]["hires"]
+        self.hires_img = sp_adata.uns["spatial"][lib_id]["images"]["0.5_mpp_150_buffer"]
         self.h, self.w = self.hires_img.shape[:2]
         
         # Get Cell type and Microenvironment information
