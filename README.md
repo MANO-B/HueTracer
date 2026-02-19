@@ -54,36 +54,27 @@ docker run -it \
   --shm-size=64g \
   --name huetracer \
   huetracer-env
+  
+# run without GPU (add -e http~proxy=... in proxy environment)
+docker run -it \
+  -p 8152:8152 \
+  -v ${pwd}:/app \
+  -v YourDataDirectory:/app/data \
+  -e no_proxy="localhost,127.0.0.1,0.0.0.0" \
+  --shm-size=64g \
+  --name huetracer \
+  huetracer-cpu
 ```
-
-# 実行 (GPUフラグは不要)
-docker run -it -p 8888:8888 -v $(pwd):/app huetracer-cpu
 
 ## Usage
 You need to prepare Visium HD spatial transcriptome data generated with SpaceRanger program by 10X. You can see the usage as follows.
 
-#### Visium HD giant cell tumor sample (with version 0.0.15)
-Our own tumor samples, 10X Chromium and Visium HD analyses  
-- [Nucleus segmentation tutorial](tutorial/nucleus_segmentation_tutorial.ipynb)  
-- [Cell type annotation for single cell transcriptome tutorial](tutorial/single_cell_annotation_tutorial.ipynb)  
-- [Cell type label transfer tutorial](tutorial/label_transfer_tutorial.ipynb)  
-- [Microenvironment prediction tutorial](tutorial/microenvironment_tutorial.ipynb)  
-- [Cell-cell interaction tutorial](tutorial/cell_cell_interaction_tutorial.ipynb)  
-nucleus_segmentation_tutorial_without_single_cell_data
-  
-#### Visium HD mouse sample without single-cell data (with version 0.0.15)
-Our own tumor sample, Visium HD analyses  
-- [Nucleus segmentation tutorial](tutorial/nucleus_segmentation_tutorial_without_single_cell_data.ipynb)  
-- [Cell type annotation tutorial](tutorial/label_transfer_tutorial_without_single_cell_data.ipynb)  
-- [Microenvironment prediction tutorial](tutorial/microenvironment_tutorial_without_single_cell_data.ipynb)  
-- [Cell-cell interaction tutorial](tutorial/cell_cell_interaction_tutorial_without_single_cell_data.ipynb)  
-  
-#### Visium HD colon adenocarcinoma sample obtained from 10X website (with version 0.0.15)
+#### Visium HD analysis with or without Chromium data
+#####Tutorial with Colon adenocarcinoma sample obtained from 10X website (with version 0.0.15)
 Download Chromium/Visium HD files.  
 [Chromium single cell transctiptome aggregated files](https://www.10xgenomics.com/platforms/visium/product-family/dataset-human-crc), Feature barcode matrix (filtered)  
 [Visium HD spatial transcriptome P2 CRC files](https://www.10xgenomics.com/jp/datasets/visium-hd-cytassist-gene-expression-libraries-of-human-crc), Binned outputs (all bin levels), Microscope image (BTF)  
   
-
 ```
 Example of data directory
 .
@@ -149,9 +140,37 @@ Example of data directory
         └── matrix.mtx.gz
 
 ```
+## Tutorials
+
+### 1️⃣ Nucleus Segmentation
+
 - [Nucleus segmentation tutorial](tutorial/nucleus_segmentation_tutorial_10x.ipynb)  
-  As BTF file is too large to handle with Bin2Cell, a cropped image will be used in this tutorial. That is not always necessary for other samples.  
-- [Cell type annotation for single cell transcriptome tutorial](tutorial/single_cell_annotation_tutorial_10x.ipynb)  
-- [Cell type label transfer tutorial](tutorial/label_transfer_tutorial_10x.ipynb)  
-- [Microenvironment prediction tutorial](tutorial/microenvironment_tutorial_10x.ipynb)  
-- [Cell-cell interaction tutorial](tutorial/cell_cell_interaction_tutorial_10x.ipynb)  
+  As the BTF file is too large to handle with Bin2Cell, a cropped image is used in this tutorial.  
+  This preprocessing step is not always necessary for other samples.
+
+---
+
+### 2️⃣ Cell Type Annotation
+
+Cell type annotation differs depending on whether Chromium single-cell data is available.
+
+#### 🔹 With Chromium Data
+
+1. [Cell type annotation for single cell transcriptome tutorial](tutorial/single_cell_annotation_tutorial_10x.ipynb)  
+2. [Cell type label transfer tutorial](tutorial/label_transfer_tutorial_10x.ipynb)  
+
+#### 🔹 Without Chromium Data
+
+- [Cell type annotation tutorial (without single-cell data)](tutorial/label_transfer_tutorial_without_single_cell_data.ipynb)
+
+---
+
+### 3️⃣ Microenvironment Analysis
+
+- [Microenvironment prediction tutorial](tutorial/microenvironment_tutorial_10x.ipynb)
+
+---
+
+### 4️⃣ Cell–Cell Interaction Analysis
+
+- [Cell-cell interaction tutorial](tutorial/cell_cell_interaction_tutorial_10x.ipynb)
