@@ -61,7 +61,7 @@ print("✅ cached:", m.name)
 PY
 
 RUN python3 -m pip install --no-cache-dir \
-    adjustText json igraph leidenalg datatable infercnvpy cupy-cuda13x
+    adjustText json igraph leidenalg datatable infercnvpy cupy-cuda13x openai
 
 RUN git clone https://github.com/digitalcytometry/cytotrace2
 RUN cd cytotrace2/cytotrace2_python
