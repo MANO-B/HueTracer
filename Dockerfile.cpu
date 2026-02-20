@@ -62,15 +62,15 @@ print("✅ cached:", m.name)
 PY
 
 RUN python3 -m pip install --no-cache-dir \
-    adjustText igraph leidenalg datatable infercnvpy openai
+    igraph leidenalg datatable infercnvpy openai
 
 RUN git clone https://github.com/digitalcytometry/cytotrace2 && \
     cd cytotrace2/cytotrace2_python && \
-    pip install .
+    python -m pip install .
 
 # 依存が崩れてないか最終チェック（マイナーバージョン差は非致命的）
-RUN python -m pip check || echo "⚠ pip check: minor version conflicts detected (non-fatal)"
+RUN python -m pip check
 
 WORKDIR /app
 EXPOSE 8152
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8152", "--no-browser", "--allow-root", "--NotebookApp.token=''"]
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8152", "--no-browser", "--allow-root"]
