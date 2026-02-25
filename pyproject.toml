@@ -37,6 +37,7 @@ dependencies = [
     "plotly",
     "scikit-image",
     "scikit-learn",
+    "scikit-misc",
     "opencv-python",
     "pandas",
     "zarr",
