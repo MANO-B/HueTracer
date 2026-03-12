@@ -27,28 +27,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --no-cache-dir -U pip setuptools wheel
+RUN python3 -m pip install --no-cache-dir -U pip 'setuptools<70.0.0' wheel
 
-# ---- numpy/scipy + tensorflow ----
-RUN python3 -m pip install --no-cache-dir --only-binary=:all: \
-      "numpy==1.26.4" "scipy==1.15.3" && \
-    python3 -m pip install --no-cache-dir \
-      "tensorflow==2.20.0"
-
-# ---- 解析ライブラリ ----
-RUN python3 -m pip install --no-cache-dir \
-    scanpy scvi-tools bin2cell stardist csbdeep seaborn \
-    adjustText gdown plotly scikit-learn opencv-python \
-    zarr imagecodecs tifffile
-
-# ---- Jupyter + huetracer ----
-RUN python3 -m pip install --no-cache-dir \
-    jupyterlab ipywidgets ipympl jupyterlab-widgets huetracer
-
-# ---- TorchはGPU（CUDA 12.8）----
-RUN python3 -m pip install --no-cache-dir \
-    torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu128
+# ---- Copy pyproject.toml and install HueTracer with dependencies ----
+WORKDIR /app
+COPY pyproject.toml /app/
+COPY src/ /app/src/
+RUN python3 -m pip install --no-cache-dir -e /app[gpu]
 
 # ---- Pre-download StarDist pretrained model ----
 RUN mkdir -p /opt/models/csbdeep /opt/models/keras /opt/cache && \
@@ -60,9 +45,7 @@ m = StarDist2D.from_pretrained("2D_versatile_fluo")
 print("✅ cached:", m.name)
 PY
 
-RUN python3 -m pip install --no-cache-dir \
-    igraph leidenalg datatable infercnvpy cupy-cuda12x openai
-
+# ---- Git-based packages ----
 RUN git clone https://github.com/digitalcytometry/cytotrace2 && \
     cd cytotrace2/cytotrace2_python && \
     python3 -m pip install .
@@ -91,6 +74,5 @@ RUN set -e; \
       fi; \
     fi
 
-WORKDIR /app
 EXPOSE 8152
 CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8152", "--no-browser", "--allow-root"]
