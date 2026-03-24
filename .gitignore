@@ -143,4 +143,3 @@ data/input/
 tutorial/.ipynb_checkpoints/
 tutorial/cache/
 tutorial/*Copy*.ipynb
-tutorial/microenvironment_tutorial_10x.ipynb
