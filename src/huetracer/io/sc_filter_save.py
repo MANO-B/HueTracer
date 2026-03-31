@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 gc = None  # Only imported if needed
 
@@ -14,6 +15,14 @@ def parse_exclude(s: str):
     if not s:
         return []
     return [x.strip() for x in s.split(",") if x.strip()]
+
+def _normalize_cluster_name(value):
+    s = str(value).strip()
+    if re.fullmatch(r"\d+", s):
+        return f"C{s}"
+    if re.fullmatch(r"C\d+", s):
+        return s
+    return s
 
 def save_filtered_sc_adata(
     ad,
@@ -37,11 +46,17 @@ def save_filtered_sc_adata(
         mapped = []
         missing = set()
         for cl in ad.obs["leiden"].astype(str).tolist():
-            if cl in annotation_dict:
-                mapped.append(annotation_dict[cl])
+            normalized_cl = _normalize_cluster_name(cl)
+            cell_type = None
+            if annotation_dict is not None:
+                cell_type = annotation_dict.get(cl)
+                if cell_type is None:
+                    cell_type = annotation_dict.get(normalized_cl)
+            if cell_type is not None:
+                mapped.append(cell_type)
             else:
                 mapped.append("Other")
-                missing.add(cl)
+                missing.add(normalized_cl)
         ad.obs["cell_type"] = mapped
     # 2) filter
     exclude = exclude_labels or ["Doublet", "Other"]
