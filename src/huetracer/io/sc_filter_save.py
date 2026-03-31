@@ -2,7 +2,7 @@ import os
 import json
 import re
 import time
-gc = None  # Only imported if needed
+import gc
 
 def fmt_bytes(n):
     for unit in ["B","KB","MB","GB","TB"]:
@@ -35,9 +35,6 @@ def save_filtered_sc_adata(
     delete_after=False
 ):
     import scanpy as sc
-    import gc as _gc
-    global gc
-    gc = _gc
     t0 = time.time()
     if remove_existing and os.path.exists(sc_filtered_path):
         os.remove(sc_filtered_path)
