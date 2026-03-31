@@ -56,15 +56,17 @@ def save_filtered_sc_adata(
     # 5) save
     filtered_sc_adata.write_h5ad(sc_filtered_path)
     size = os.path.getsize(sc_filtered_path)
-    # 6) cleanup
-    if delete_after:
-        del filtered_sc_adata
-        gc.collect()
-    return {
-        "n_kept": filtered_sc_adata.n_obs,
+    n_kept = filtered_sc_adata.n_obs
+    result = {
+        "n_kept": n_kept,
         "n_total": ad.n_obs,
         "excluded": exclude,
         "missing_clusters": sorted(list(missing)) if write_celltype else [],
         "file_size": fmt_bytes(size),
         "elapsed": time.time()-t0
     }
+    # 6) cleanup
+    if delete_after:
+        del filtered_sc_adata
+        gc.collect()
+    return result
