@@ -104,6 +104,12 @@ from .io.saver import (
     format_bytes,
 )
 
+from .io.sc_filter_save import (
+    fmt_bytes,
+    parse_exclude,
+    save_filtered_sc_adata,
+)
+
 # Plotting and Visualization Modules
 from .plotting.plot import (
     plot_all_cell_type_highlights,
@@ -236,7 +242,6 @@ __all__ = [
     "make_array_row_col_mask",
     "apply_array_row_col_mask",
     "save_cropped_image",
-    "prepare_he_path",
     "save_anndata",
     "save_anndata_batch",
     "format_bytes",
