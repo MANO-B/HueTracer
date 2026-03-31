@@ -91,6 +91,9 @@ class SaveAnnDataWidget:
             output_paths = {"cdata": self.cdata_path}
             
             if self.save_sp_w.value and self.sp_adata is not None:
+                if not self.sp_adata_path:
+                    print("❌ sp_adata_path is required but not provided.")
+                    return
                 adata_dict["sp_adata"] = self.sp_adata
                 output_paths["sp_adata"] = self.sp_adata_path
             
