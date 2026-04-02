@@ -4,15 +4,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scanpy as sc
 import os
-import random
+from huetracer.core.reproducibility import set_global_seed, get_seed_from_env
 
 class ScanpyQCPipelineWidget:
     """
     Interactive Scanpy QC / Filtering / Leiden pipeline widget.
     """
-    def __init__(self, sp_adata):
+    def __init__(self, sp_adata, seed=None):
         self.sp_adata = sp_adata
-        self.SEED = 42
+        self.SEED = get_seed_from_env(default=42) if seed is None else int(seed)
         self.N_THREADS = 1
         self.out = widgets.Output()
         self._init_widgets()
@@ -24,8 +24,7 @@ class ScanpyQCPipelineWidget:
 
     def _set_reproducibility(self):
         """Apply deterministic settings for repeatable embeddings and clustering."""
-        np.random.seed(self.SEED)
-        random.seed(self.SEED)
+        set_global_seed(self.SEED)
 
         # Keep CPU-level parallelism stable where possible.
         os.environ["OMP_NUM_THREADS"] = str(self.N_THREADS)

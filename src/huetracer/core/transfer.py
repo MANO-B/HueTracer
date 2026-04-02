@@ -9,13 +9,11 @@ from itertools import cycle
 import warnings
 from typing import Optional, Dict, Tuple, Any
 import logging
+from .reproducibility import set_global_seed, get_seed_from_env
 
-# Reproducibility: set random seed
-SEED = 42
-import random
-np.random.seed(SEED)
-random.seed(SEED)
-scvi.settings.seed = SEED
+# Reproducibility: set random seed once at import time (can be overridden by HUETRACER_SEED)
+SEED = get_seed_from_env(default=42)
+set_global_seed(SEED)
 # Log settings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -560,6 +558,8 @@ def run_scvi_label_transfer(filtered_sc_adata: sc.AnnData,
                             save_path_for_today: str,
                             h5ad_predicted_full_save_path: str,
                             device = "auto",
+                            seed: Optional[int] = None,
+                            deterministic_torch: bool = True,
                             num_workers: int = "auto",
                             batch_size: int = 128,
                             max_epochs: int = 400) -> sc.AnnData:
@@ -584,6 +584,12 @@ def run_scvi_label_transfer(filtered_sc_adata: sc.AnnData,
         Path for the predicted H5AD file
     device : str or torch.device
         Computational device
+    seed : int or None
+        Random seed used for numpy/random/scanpy/torch/scvi reproducibility.
+        If None, uses HUETRACER_SEED (default: 42).
+    deterministic_torch : bool
+        Whether to force deterministic PyTorch algorithms when available.
+        Set to False to allow non-deterministic execution paths, which can be faster.
     num_workers : int or "auto"
         Number of DataLoader workers ("auto" for automatic setting, recommended 4-16)
     batch_size : int
@@ -596,6 +602,10 @@ def run_scvi_label_transfer(filtered_sc_adata: sc.AnnData,
     sp_adata_predicted : AnnData
         Spatial data with prediction results
     """
+
+    # Keep behavior aligned with notebook reproducibility block.
+    effective_seed = get_seed_from_env(default=42) if seed is None else int(seed)
+    set_global_seed(effective_seed, deterministic_torch=deterministic_torch)
     
     # Initialize scANVI label transfer class
     label_transfer = SCVILabelTransfer(device=device)
