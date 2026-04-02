@@ -33,6 +33,7 @@ docker build -f Dockerfile -t huetracer-env .
 # run at upstream directory of 10x data files
 # /app is the working directory (turorial directory, etc.)
 # /data is set to your data directory
+# CUBLAS_WORKSPACE_CONFIG is preset in Dockerfile for GPU image.
 docker run -it \
   --gpus all \
   -p 8152:8152 \
