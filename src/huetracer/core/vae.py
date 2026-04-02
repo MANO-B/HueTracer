@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm
 import warnings
 import torch.multiprocessing as mp
+from .reproducibility import set_global_seed, get_seed_from_env
 
 # Helper function to format time in HH:MM:SS or MM:SS format
 def format_time(seconds):
@@ -151,14 +152,23 @@ def _has_cugraph():
 class SpatialMicroenvironmentAnalyzer:
     """Spatial transcriptomics microenvironment analysis with CPU/CUDA/MPS support."""
 
-    def __init__(self, coords, expression_data, k_neighbors=30, device=None, prefer_gpu=True):
+    def __init__(self, coords, expression_data, k_neighbors=30, device=None, prefer_gpu=True, seed=None, deterministic_torch: bool = True):
         """
         coords: np.ndarray (n_cells, 2)
         expression_data: np.ndarray (n_cells, n_genes)  (dense recommended)
+        deterministic_torch: bool
+            If True, requests deterministic PyTorch algorithms (cuDNN/cuBLAS).
+            Set to False to allow non-deterministic paths, which can be faster.
+            Has no effect on CPU; on MPS only warn_only is used.
         """
         self.coords = np.asarray(coords)
         self.expression_data = np.asarray(expression_data)
         self.k_neighbors = int(k_neighbors)
+        self.seed = get_seed_from_env(default=42) if seed is None else int(seed)
+        self.deterministic_torch = bool(deterministic_torch)
+
+        # Keep global RNGs deterministic for this analysis instance.
+        set_global_seed(self.seed, deterministic_torch=self.deterministic_torch)
 
         self.n_cells, self.n_genes = self.expression_data.shape
         self.device = device if device is not None else pick_torch_device(prefer_gpu=prefer_gpu)
@@ -430,10 +440,29 @@ class SpatialMicroenvironmentAnalyzer:
         min_dist=0.5,
         n_components=2,
         resolution=0.3,
-        seed=42,
+        seed=None,
         cell_type_data=None,
         use_gpu_if_available=True,
+        clustering_backend="auto",  # "auto"|"cpu"|"gpu"
+        missing_vertex_policy="neighbor",  # "neighbor"|"noise"|"singleton"
     ):
+        """Run UMAP + Leiden clustering with optional backend/policy controls.
+
+        Parameters
+        ----------
+        clustering_backend
+            "auto": prefer GPU when available and allowed.
+            "cpu": force Scanpy CPU path.
+            "gpu": force RAPIDS path (raises if unavailable).
+        missing_vertex_policy
+            Policy for vertices that do not receive a partition label on GPU path:
+            - "neighbor": copy first available neighbor label (default, stable cluster counts)
+            - "noise": keep as -1
+            - "singleton": assign unique label per missing vertex (legacy behavior)
+        """
+        seed = self.seed if seed is None else int(seed)
+        set_global_seed(seed, deterministic_torch=self.deterministic_torch)
+
         if not hasattr(self, "latent_features"):
             raise RuntimeError("Run extract_latent_features() first.")
 
@@ -443,12 +472,30 @@ class SpatialMicroenvironmentAnalyzer:
         imputer = SimpleImputer(strategy="constant", fill_value=0)
         X = imputer.fit_transform(X)
 
-        use_gpu = (
-            use_gpu_if_available
-            and self.rapids_available
+        backend = str(clustering_backend).lower()
+        if backend not in {"auto", "cpu", "gpu"}:
+            raise ValueError("clustering_backend must be one of: auto, cpu, gpu")
+
+        missing_policy = str(missing_vertex_policy).lower()
+        if missing_policy not in {"neighbor", "noise", "singleton"}:
+            raise ValueError("missing_vertex_policy must be one of: neighbor, noise, singleton")
+
+        gpu_ready = (
+            self.rapids_available
             and self.cugraph_available
             and str(self.device).startswith("cuda")
         )
+
+        if backend == "cpu":
+            use_gpu = False
+        elif backend == "gpu":
+            if not gpu_ready:
+                raise RuntimeError("GPU clustering_backend requested but RAPIDS/cugraph CUDA path is unavailable.")
+            use_gpu = True
+        else:  # auto
+            use_gpu = use_gpu_if_available and gpu_ready
+
+        self.last_clustering_backend = "gpu" if use_gpu else "cpu"
 
         if use_gpu:
             try:
@@ -478,6 +525,8 @@ class SpatialMicroenvironmentAnalyzer:
                 
                 # 重複除去（kNNの性質上ほぼ無いが念のため）
                 edges = edges.drop_duplicates()
+                # Keep deterministic edge order before graph construction.
+                edges = edges.sort_values(by=["src", "dst"])
                 print("edges:", len(edges))
                 print("unique vertices in edges:", int(cudf.concat([edges["src"], edges["dst"]]).nunique()))
                 G = cugraph.Graph(directed=False)
@@ -486,13 +535,6 @@ class SpatialMicroenvironmentAnalyzer:
                 umap = cuUMAP(n_neighbors=n_neighbors, min_dist=min_dist, n_components=n_components, random_state=seed)
                 emb = umap.fit_transform(Xg)
                 
-                # ---- Leiden (GPU) ----
-                parts, _ = cugraph.leiden(G, resolution=resolution, random_state=seed)
-                parts = parts.sort_values("vertex")
-                clusters = parts["partition"].to_numpy()
-                self.umap_embedding = cp.asnumpy(emb)
-                self.clusters = clusters.astype(int)
-
                 print("✅ UMAP+Leiden on GPU (RAPIDS)")
                 m = len(edges)
                 uniq_v = int(cudf.concat([edges["src"], edges["dst"]]).nunique())
@@ -512,16 +554,35 @@ class SpatialMicroenvironmentAnalyzer:
                 
                 missing = np.sum(clusters < 0)
                 if missing > 0:
-                    print(f"⚠️ leiden returned partitions for {n-missing}/{n} vertices. Filling missing with unique labels.")
-                    start = clusters.max() + 1 if (clusters >= 0).any() else 0
-                    clusters[clusters < 0] = np.arange(start, start + missing, dtype=np.int32)
+                    print(f"⚠️ leiden returned partitions for {n-missing}/{n} vertices. Applying missing policy: {missing_policy}.")
+                    if missing_policy == "neighbor":
+                        idx_np = cp.asnumpy(idx)
+                        unresolved = clusters < 0
+                        for i in np.where(unresolved)[0]:
+                            neigh = idx_np[i]
+                            neigh = neigh[neigh != i]
+                            valid = neigh[clusters[neigh] >= 0]
+                            if valid.size > 0:
+                                clusters[i] = clusters[valid[0]]
+                        # Any still unresolved fall back to noise label.
+                        clusters[clusters < 0] = -1
+                    elif missing_policy == "singleton":
+                        start = clusters.max() + 1 if (clusters >= 0).any() else 0
+                        clusters[clusters < 0] = np.arange(start, start + missing, dtype=np.int32)
+                    else:  # noise
+                        clusters[clusters < 0] = -1
                 
+                self.umap_embedding = cp.asnumpy(emb)
                 self.clusters = clusters.astype(int)
-                print("n_clusters:", int(np.unique(self.clusters).size))
+                valid = self.clusters[self.clusters >= 0]
+                print("n_clusters (excluding -1):", int(np.unique(valid).size) if valid.size else 0)
 
             except Exception as e:
+                if backend == "gpu":
+                    raise
                 print(f"⚠️ GPU UMAP/Leiden failed -> fallback to scanpy CPU. Reason: {e}")
                 use_gpu = False
+                self.last_clustering_backend = "cpu"
 
         if not use_gpu:
             adata = sc.AnnData(X=X)
@@ -544,7 +605,9 @@ class SpatialMicroenvironmentAnalyzer:
                 self.adata.obs["leiden"] = pd.Categorical(self.clusters.astype(str))
             self.adata.obs["cell_type"] = pd.Categorical(np.asarray(cell_type_data).astype(str))
 
-        print(f"Number of clusters: {len(np.unique(self.clusters))}")
+        valid = self.clusters[self.clusters >= 0]
+        n_clusters = int(np.unique(valid).size) if valid.size else 0
+        print(f"Number of clusters (excluding -1): {n_clusters}")
         return self.umap_embedding, self.clusters
 
     # -------------------------
