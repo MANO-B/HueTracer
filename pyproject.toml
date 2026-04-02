@@ -35,6 +35,7 @@ dependencies = [
     "adjustText",
     "gdown",
     "plotly",
+    "anywidget",
     "scikit-image",
     "scikit-learn",
     "scikit-misc",

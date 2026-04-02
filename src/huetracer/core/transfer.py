@@ -10,6 +10,12 @@ import warnings
 from typing import Optional, Dict, Tuple, Any
 import logging
 
+# Reproducibility: set random seed
+SEED = 42
+import random
+np.random.seed(SEED)
+random.seed(SEED)
+scvi.settings.seed = SEED
 # Log settings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -659,7 +665,7 @@ def generate_quality_report(sp_adata: sc.AnnData,
             f.write(f"   - Ratio of low-confidence cells (<0.5): {low_conf_ratio:.1%}\n")
         
         # Cell type-specific statistics
-        print(f"💾 Saving the figuer to {out_pdf}...")
+        # print(f"💾 Saving the figuer to {out_pdf}...")
         f.write(f"\n3. Cell Type Distribution\n")
         type_counts = sp_adata.obs['predicted_cell_type'].value_counts()
         for cell_type, count in type_counts.items():

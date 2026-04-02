@@ -138,3 +138,8 @@ dmypy.json
 results/
 data/input/
 .cache/
+
+# Tutorial generated artifacts
+tutorial/.ipynb_checkpoints/
+tutorial/cache/
+tutorial/*Copy*.ipynb

@@ -1,1267 +1,691 @@
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.widgets import LassoSelector, RectangleSelector, Button
-from matplotlib.path import Path
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from itertools import cycle
 import ipywidgets as widgets
 from IPython.display import display, clear_output
-from matplotlib.patches import Polygon
+from PIL import Image as PILImage
+import plotly.graph_objects as go
 
-class LassoCellSelectorMicroenvironment:
-    def __init__(self, sp_adata, merged_df, lib_id, clusters):
-        self.sp_adata = sp_adata.copy()
+
+def _build_figure_widget_or_raise():
+    """Create FigureWidget or raise a clear ImportError.
+
+    Plotly 6+ may require anywidget in notebook environments.
+    """
+    try:
+        return go.FigureWidget()
+    except Exception as exc:
+        raise ImportError(
+            "Plotly FigureWidget is unavailable in this environment. "
+            "Install anywidget (pip install anywidget) or use fallback selector."
+        ) from exc
+
+
+def _downsample_image(img, factor):
+    """Downsample an image array for display only."""
+    if factor >= 1.0:
+        return img
+
+    h, w = img.shape[:2]
+    new_h = max(1, int(h * factor))
+    new_w = max(1, int(w * factor))
+
+    if img.dtype in (np.float32, np.float64):
+        arr = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+        out = np.array(PILImage.fromarray(arr).resize((new_w, new_h), PILImage.LANCZOS))
+        return (out / 255.0).astype(img.dtype)
+
+    return np.array(PILImage.fromarray(img.astype(np.uint8)).resize((new_w, new_h), PILImage.LANCZOS))
+
+
+def _limit_image_pixels(img, max_pixels=220000):
+    """Cap display image size to keep plotly interaction responsive."""
+    h, w = img.shape[:2]
+    pixels = h * w
+    if pixels <= max_pixels:
+        return img
+
+    factor = (max_pixels / float(pixels)) ** 0.5
+    return _downsample_image(img, factor)
+
+
+def _to_pil_image(arr):
+    """Convert numpy image to PIL image for plotly layout images."""
+    if arr.dtype in (np.float32, np.float64):
+        arr = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
+    elif arr.dtype != np.uint8:
+        arr = arr.astype(np.uint8)
+    return PILImage.fromarray(arr)
+
+
+def _to_plotly_image_array(arr):
+    """Convert image array to uint8 format accepted by go.Image."""
+    if arr.dtype in (np.float32, np.float64):
+        out = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
+    elif arr.dtype != np.uint8:
+        out = arr.astype(np.uint8)
+    else:
+        out = arr
+    return out
+
+
+def _as_aligned_series(values, index, name):
+    """Normalize labels to a pandas Series aligned to `index`."""
+    if isinstance(values, pd.Series):
+        out = values.reindex(index)
+    else:
+        out = pd.Series(values, index=index)
+    out.name = name
+    return out
+
+
+def _make_color_map(labels):
+    """Create a stable color map for categorical labels."""
+    palette = sns.color_palette("tab20", n_colors=max(20, len(labels)))
+    cmap = {}
+    for i, label in enumerate(labels):
+        r, g, b = palette[i % len(palette)]
+        cmap[str(label)] = f"rgb({int(r*255)}, {int(g*255)}, {int(b*255)})"
+    return cmap
+
+
+class _BasePlotlySelector:
+    """Shared high-performance plotly selector behavior."""
+
+    def __init__(self, sp_adata, merged_df, lib_id, downsample_factor=0.25):
         self.sp_adata_ref = sp_adata
         self.merged = merged_df.copy()
         self.merged_original = merged_df
         self.lib_id = lib_id
-        self.original_clusters = clusters.copy()
-        self.current_clusters = clusters.copy()
-        
-        # Image data
-        self.hires_img = sp_adata.uns["spatial"][lib_id]["images"]["0.5_mpp_150_buffer"]
-        self.h, self.w = self.hires_img.shape[:2]
-        
-        # Group information
-        self.group_order = self.merged["predicted_microenvironment"].dropna().unique()
-        
-        # Coordinate range
-        self.x_min_data = self.merged["x"].min()
-        self.x_max_data = self.merged["x"].max()
-        self.y_min_data = self.merged["y"].min()
-        self.y_max_data = self.merged["y"].max()
-        
-        # Selection-related variables
-        self.lasso_selector = None
-        self.selected_path = None
-        self.selected_indices = []
-        self.current_selection_polygon = None
-        
-        # Display settings
-        self.displayed_groups = set(str(g) for g in self.group_order)
-        self.zoom_level = 1.0
-        self.pan_offset = [0, 0]
-        
-        # Plot elements
-        self.fig = None
-        self.ax = None
-        self.scatter_plots = {}
-        
-        print(f"=== Data Info ===")
-        print(f"Total cells: {len(self.merged)}")
-        print(f"Groups: {len(self.group_order)}")
-        
-        # Color settings
-        self.setup_colors()
-        
-        # Create UI
-        self.create_ui()
-        
-    def cleanup_selectors(self):
-        """Properly clean up selectors"""
-        if hasattr(self, 'lasso_selector') and self.lasso_selector is not None:
-            try:
-                self.lasso_selector.disconnect_events()
-            except:
-                pass
-            self.lasso_selector = None
-            
-        if hasattr(self, 'rect_selector') and self.rect_selector is not None:
-            try:
-                self.rect_selector.set_active(False)
-            except:
-                pass
-            self.rect_selector = None
-    
-    def setup_colors(self):
-        """Set up colors and markers"""
-        palette = sns.color_palette("tab20", n_colors=max(20, len(self.group_order)))
-        
-        self.color_map = {}
-        for i, group in enumerate(self.group_order):
-            color = palette[i % len(palette)]
-            self.color_map[group] = color
-            self.color_map[str(group)] = color
-    
-    def create_ui(self):
-        """Create UI components"""
-        
-        # Selection mode
-        self.selection_mode = widgets.RadioButtons(
-            options=['Lasso', 'Rectangle'],
-            value='Lasso',
-            #description='Mode:',
-            style={'description_width': 'initial'}
-        )
-        self.selection_mode.observe(self.on_mode_change, names='value')
-        
-        # Group display selection (multi-select)
-        self.group_selector = widgets.SelectMultiple(
-            options=[str(g) for g in self.group_order],
-            value=[str(g) for g in self.group_order][:min(1, len(self.group_order))],
-            #description='Display Groups:',
-            style={'description_width': 'initial'},
-            layout=widgets.Layout(height='150px')
-        )
-        self.group_selector.observe(self.on_group_display_change, names='value')
-        
-        # New label input
-        self.new_label_input = widgets.Text(
-            value='selected',
-            placeholder='Enter new label',
-            description='New Label:',
-            style={'description_width': 'initial'}
-        )
+        self.downsample_factor = downsample_factor
 
-        # Zoom controls
-        self.zoom_slider = widgets.FloatSlider(
-            value=1.0, min=0.5, max=10.0, step=0.1,
-            description='Zoom:',
-            readout_format='.1f'
-        )
-        self.zoom_slider.observe(self.on_zoom_change, names='value')
-        
-        # Buttons
-        self.apply_btn = widgets.Button(
-            description='Apply Selection',
-            button_style='success',
-            icon='check'
-        )
-        self.clear_selection_btn = widgets.Button(
-            description='Clear Selection',
-            button_style='warning',
-            icon='times'
-        )
-        self.reset_btn = widgets.Button(
-            description='Reset All',
-            button_style='danger',
-            icon='refresh'
-        )
-        self.fit_view_btn = widgets.Button(
-            description='Fit to View',
-            button_style='info',
-            icon='expand'
-        )
-        self.update_anndata_btn = widgets.Button(
-            description='Update AnnData',
-            button_style='primary',
-            icon='save',
-            tooltip='Update the original AnnData object with current changes'
-        )
-        self.export_btn = widgets.Button(
-            description='Export Data',
-            button_style='info',
-            icon='download',
-            tooltip='Export updated merged DataFrame and clusters'
-        )
-        
-        self.apply_btn.on_click(self.apply_selection)
-        self.clear_selection_btn.on_click(self.clear_selection)
-        self.reset_btn.on_click(self.reset_all)
-        self.fit_view_btn.on_click(self.fit_to_view)
-        self.update_anndata_btn.on_click(self.update_anndata)
-        self.export_btn.on_click(self.export_data)
-        
-        # Status
+        raw_img = sp_adata.uns["spatial"][lib_id]["images"]["0.5_mpp_150_buffer"]
+        self.h, self.w = raw_img.shape[:2]
+        self.bg_img = _limit_image_pixels(_downsample_image(raw_img, downsample_factor))
+        self.bg_pil = _to_pil_image(self.bg_img)
+        self.bg_plot = _to_plotly_image_array(self.bg_img)
+        del raw_img
+
+        self.index_values = self.merged.index.to_numpy()
+        self.x = self.merged["x"].to_numpy()
+        self.y = self.merged["y"].to_numpy()
+        self.index_to_pos = {idx: i for i, idx in enumerate(self.index_values)}
+
+        self.zoom_level = 1.0
+        self.max_highlight_points = 20000
+        self.max_render_points = 180000
+        self.selected_global_indices = np.array([], dtype=self.index_values.dtype)
+        self.visible_positions = np.array([], dtype=np.int64)
+
+        self.output = widgets.Output(layout=widgets.Layout(width="100%", min_width="760px", height="760px"))
         self.status = widgets.HTML(value="<b>Status:</b> Ready")
         self.selection_info = widgets.HTML(value="<b>Selected:</b> 0 cells")
-        
-        # Output area
-        self.output = widgets.Output()
-        
-        # Point size adjustment
         self.point_size_slider = widgets.FloatSlider(
-            value=3.0, min=0.1, max=10.0, step=0.1,
-            description='Point Size:',
-            readout_format='.1f'
+            value=2.0,
+            min=0.2,
+            max=10.0,
+            step=0.1,
+            description="Point Size:",
+            readout_format=".1f",
         )
-        self.point_size_slider.observe(self.on_point_size_change, names='value')
-        
-        # Opacity adjustment
-        self.alpha_slider = widgets.FloatSlider(
-            value=0.8, min=0.1, max=1.0, step=0.1,
-            description='Opacity:',
-            readout_format='.1f'
+        self.opacity_slider = widgets.FloatSlider(
+            value=0.35,
+            min=0.05,
+            max=1.0,
+            step=0.05,
+            description="Opacity:",
+            readout_format=".2f",
         )
-        self.alpha_slider.observe(self.on_alpha_change, names='value')
-    
-    def create_plot(self):
-        """Create the main plot"""
+        self.zoom_slider = widgets.FloatSlider(
+            value=1.0,
+            min=0.5,
+            max=12.0,
+            step=0.1,
+            description="Zoom:",
+            readout_format=".1f",
+        )
+        self.selection_mode = widgets.ToggleButtons(
+            options=[("Lasso", "lasso"), ("Rectangle", "select"), ("Pan", "pan")],
+            value="lasso",
+            description="Mode:",
+        )
+
+        self.point_size_slider.observe(self._on_style_change, names="value")
+        self.opacity_slider.observe(self._on_style_change, names="value")
+        self.zoom_slider.observe(self._on_zoom_change, names="value")
+        self.selection_mode.observe(self._on_mode_change, names="value")
+
+        self.fig = _build_figure_widget_or_raise()
+        self.image_trace_idx = 0
+        self.cells_trace_idx = 1
+        self.selected_trace_idx = 2
+        self._build_figure()
+
+    def _build_figure(self):
+        img_h, img_w = self.bg_plot.shape[:2]
+        self.fig.add_trace(
+            go.Image(
+                z=self.bg_plot,
+                x0=0,
+                y0=0,
+                dx=self.w / max(1, img_w),
+                dy=self.h / max(1, img_h),
+                name="HE",
+                hoverinfo="skip",
+                opacity=1.0,
+            )
+        )
+
+        self.fig.add_trace(
+            go.Scattergl(
+                x=[],
+                y=[],
+                mode="markers",
+                marker={"size": self.point_size_slider.value, "opacity": self.opacity_slider.value, "color": []},
+                customdata=[],
+                hoverinfo="skip",
+                name="cells",
+                showlegend=False,
+            )
+        )
+        self.fig.add_trace(
+            go.Scattergl(
+                x=[],
+                y=[],
+                mode="markers",
+                marker={"size": self.point_size_slider.value * 2.5, "opacity": 1.0, "color": "yellow"},
+                hoverinfo="skip",
+                name="selected",
+                showlegend=False,
+            )
+        )
+
+        self.fig.update_layout(
+            dragmode=self.selection_mode.value,
+            width=900,
+            height=740,
+            template="plotly_white",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=30, b=10),
+            showlegend=False,
+        )
+        self.fig.update_xaxes(showgrid=False, visible=False, range=[0, self.w])
+        self.fig.update_yaxes(showgrid=False, visible=False, range=[self.h, 0], scaleanchor="x", scaleratio=1)
+
+        self.fig.data[self.cells_trace_idx].on_selection(self._on_plot_selection)
+
+    def _on_mode_change(self, change):
+        self.fig.update_layout(dragmode=change["new"])
+
+    def _on_zoom_change(self, change):
+        self.zoom_level = change["new"]
+        x_center = (self.x.min() + self.x.max()) / 2.0
+        y_center = (self.y.min() + self.y.max()) / 2.0
+        x_range = (self.x.max() - self.x.min()) / self.zoom_level
+        y_range = (self.y.max() - self.y.min()) / self.zoom_level
+        self.fig.update_xaxes(range=[x_center - x_range / 2, x_center + x_range / 2])
+        self.fig.update_yaxes(range=[y_center + y_range / 2, y_center - y_range / 2])
+
+    def _on_style_change(self, _):
+        self.fig.data[self.cells_trace_idx].marker.size = self.point_size_slider.value
+        self.fig.data[self.cells_trace_idx].marker.opacity = self.opacity_slider.value
+        self.fig.data[self.selected_trace_idx].marker.size = self.point_size_slider.value * 2.5
+
+    def _sample_render_positions(self, positions):
+        if len(positions) <= self.max_render_points:
+            return positions
+        keep = np.random.default_rng(0).choice(positions, size=self.max_render_points, replace=False)
+        keep.sort()
+        return keep
+
+    def _sample_highlight_positions(self, positions):
+        if len(positions) <= self.max_highlight_points:
+            return positions
+        keep = np.random.default_rng(0).choice(positions, size=self.max_highlight_points, replace=False)
+        keep.sort()
+        return keep
+
+    def _refresh_selected_overlay(self):
+        if len(self.selected_global_indices) == 0:
+            self.fig.data[self.selected_trace_idx].x = []
+            self.fig.data[self.selected_trace_idx].y = []
+            self.selection_info.value = "<b>Selected:</b> 0 cells"
+            return
+
+        pos = self.merged.index.get_indexer(self.selected_global_indices)
+        pos = pos[pos >= 0]
+        pos = self._sample_highlight_positions(pos)
+
+        self.fig.data[self.selected_trace_idx].x = self.x[pos]
+        self.fig.data[self.selected_trace_idx].y = self.y[pos]
+
+        extra = ""
+        if len(self.selected_global_indices) > self.max_highlight_points:
+            extra = f" (showing {self.max_highlight_points})"
+        self.selection_info.value = f"<b>Selected:</b> {len(self.selected_global_indices)} cells{extra}"
+
+    def _on_plot_selection(self, trace, points, selector):
+        if points is None or len(points.point_inds) == 0:
+            self.selected_global_indices = np.array([], dtype=self.index_values.dtype)
+            self._refresh_selected_overlay()
+            return
+
+        cd = np.asarray(trace.customdata)
+        if cd.size == 0:
+            self.selected_global_indices = np.array([], dtype=self.index_values.dtype)
+            self._refresh_selected_overlay()
+            return
+
+        selected = cd[np.asarray(points.point_inds, dtype=np.int64)]
+        self.selected_global_indices = np.asarray(selected, dtype=self.index_values.dtype)
+        self._refresh_selected_overlay()
+
+    def _refresh_main_trace(self, visible_positions, color_by):
+        visible_positions = self._sample_render_positions(visible_positions)
+        self.visible_positions = visible_positions
+
+        colors = [color_by[pos] for pos in visible_positions]
+
+        self.fig.data[self.cells_trace_idx].x = self.x[visible_positions]
+        self.fig.data[self.cells_trace_idx].y = self.y[visible_positions]
+        self.fig.data[self.cells_trace_idx].customdata = self.index_values[visible_positions]
+        self.fig.data[self.cells_trace_idx].marker.color = colors
+        self.fig.data[self.cells_trace_idx].marker.size = self.point_size_slider.value
+        self.fig.data[self.cells_trace_idx].marker.opacity = self.opacity_slider.value
+
+    def _mount_figure(self):
         with self.output:
             clear_output(wait=True)
-            
-            # Disable selectors
-            self.cleanup_selectors()
-            
-            # Close existing figure if any
-            if self.fig is not None:
-                plt.close(self.fig)
-                self.fig = None
-                self.ax = None
-            
-            # Close extra figures
-            plt.close('all')
-            
-             # Create new figure
-            self.fig, self.ax = plt.subplots(figsize=(8, 8))
-            
-            # Background image
-            self.ax.imshow(self.hires_img, extent=[0, self.w, self.h, 0], alpha=0.8)
-            
-            # Plot only the displayed groups
-            self.scatter_plots = {}
-            displayed_groups = list(self.group_selector.value)
-            
-            for group in displayed_groups:
-                # Check for both string and original type
-                group_data = self.merged[
-                    (self.merged["predicted_microenvironment"] == group) | 
-                    (self.merged["predicted_microenvironment"].astype(str) == str(group))
-                ]
-                
-                if len(group_data) > 0:
-                    scatter = self.ax.scatter(
-                        group_data["x"],
-                        group_data["y"],
-                        c=[self.color_map.get(group, 'gray')],
-                        s=self.point_size_slider.value,
-                        alpha=self.alpha_slider.value,
-                        label=str(group),
-                        picker=True,
-                        rasterized=True
-                    )
-                    self.scatter_plots[group] = scatter
+            display(self.fig)
 
-            special_groups = self.new_label_input.value.strip()
-            if not special_groups:
-                for special_group in special_groups:
-                    if special_group in self.merged["predicted_microenvironment"].values or str(special_group) in self.merged["predicted_microenvironment"].astype(str).values:
-                        group_data = self.merged[self.merged["predicted_microenvironment"] == special_group]
-                        
-                        if len(group_data) > 0:
-                            scatter = self.ax.scatter(
-                                group_data["x"],
-                                group_data["y"],
-                                c=self.color_map.get(special_group, 'red'),
-                                s=self.point_size_slider.value * 2,
-                                alpha=0.9,
-                                label=str(special_group),
-                                marker='x',
-                                rasterized=True
-                            )
-                            self.scatter_plots[special_group] = scatter
-            
-            # Axis settings
-            self.update_view()
-            
-            # Legend
-            if len(self.scatter_plots) <= 20:
-                self.ax.legend(loc='upper right', fontsize=8, framealpha=0.8)
-            
-            self.ax.set_aspect('equal')
-            self.ax.axis('off')
-            
-            # Set up selectors
-            self.setup_selector()
-            
-            plt.tight_layout()
-            plt.show()
-    
-    def setup_selector(self):
-        """Set up selection tools"""
-        if self.selection_mode.value == 'Lasso':
-            self.lasso_selector = LassoSelector(
-                self.ax,
-                onselect=self.on_lasso_select,
-                useblit=True,
-                button=[1],  # Left click
-            )
-        elif self.selection_mode.value == 'Rectangle':
-            self.rect_selector = RectangleSelector(
-                self.ax,
-                self.on_rect_select,
-                useblit=True,
-                button=[1],
-                minspanx=5,
-                minspany=5,
-                spancoords='pixels',
-                interactive=True
-            )
-    
-    def on_lasso_select(self, verts):
-        """Callback for lasso selection"""
-        # Create a path
-        self.selected_path = Path(verts)
-        
-        # Consider only data for currently displayed groups
-        displayed_groups = list(self.group_selector.value)
-        mask_display = self.merged["predicted_microenvironment"].isin(displayed_groups) | \
-                       self.merged["predicted_microenvironment"].astype(str).isin(displayed_groups)
-        
-        displayed_data = self.merged[mask_display]
-        
-        # Determine points inside the path
-        if len(displayed_data) > 0:
-            points = displayed_data[['x', 'y']].values
-            inside = self.selected_path.contains_points(points)
-            self.selected_indices = displayed_data[inside].index.tolist()
-        else:
-            self.selected_indices = []
-        
-        # Visualize the selected area
-        if self.current_selection_polygon:
-            self.current_selection_polygon.remove()
-        
-        self.current_selection_polygon = Polygon(
-            verts, fill=False, edgecolor='yellow',
-            linewidth=2, linestyle='--', alpha=0.8
-        )
-        self.ax.add_patch(self.current_selection_polygon)
-        
-        # Highlight selected points
-        if len(self.selected_indices) > 0:
-            selected_data = self.merged.loc[self.selected_indices]
-            self.ax.scatter(
-                selected_data["x"],
-                selected_data["y"],
-                c='yellow',
-                s=self.point_size_slider.value * 3,
-                alpha=1.0,
-                marker='o',
-                edgecolors='red',
-                linewidths=0.5
-            )
-        
-        self.fig.canvas.draw_idle()
-        
-        # Update status
-        self.selection_info.value = f"<b>Selected:</b> {len(self.selected_indices)} cells"
-    
-    def on_rect_select(self, eclick, erelease):
-        """Callback for rectangle selection"""
-        x1, y1 = eclick.xdata, eclick.ydata
-        x2, y2 = erelease.xdata, erelease.ydata
-        
-        if None in [x1, y1, x2, y2]:
-            return
-        
-        x_min, x_max = min(x1, x2), max(x1, x2)
-        y_min, y_max = min(y1, y2), max(y1, y2)
-        
-        # Consider only data for currently displayed groups
-        displayed_groups = list(self.group_selector.value)
-        mask = (
-            (self.merged["x"] >= x_min) & 
-            (self.merged["x"] <= x_max) &
-            (self.merged["y"] >= y_min) & 
-            (self.merged["y"] <= y_max)
-        )
-        
-        mask_display = self.merged["predicted_microenvironment"].isin(displayed_groups) | \
-                       self.merged["predicted_microenvironment"].astype(str).isin(displayed_groups)
-        mask = mask & mask_display
-        
-        self.selected_indices = self.merged[mask].index.tolist()
-        
-        # Update status
-        self.selection_info.value = f"<b>Selected:</b> {len(self.selected_indices)} cells"
-    
-    def on_mode_change(self, change):
-        """When selection mode is changed"""
-        self.create_plot()
-    
-    def on_group_display_change(self, change):
-        """When displayed groups are changed"""
-        self.displayed_groups = set(change['new'])
-        self.create_plot()
-    
-    def on_zoom_change(self, change):
-        """When zoom is changed"""
-        self.zoom_level = change['new']
-        self.update_view()
-    
-    def on_point_size_change(self, change):
-        """When point size is changed"""
-        for scatter in self.scatter_plots.values():
-            scatter.set_sizes([change['new']])
-        if self.fig:
-            self.fig.canvas.draw_idle()
-    
-    def on_alpha_change(self, change):
-        """When opacity is changed"""
-        for scatter in self.scatter_plots.values():
-            scatter.set_alpha(change['new'])
-        if self.fig:
-            self.fig.canvas.draw_idle()
-    
-    def update_view(self):
-        """Update the view (zoom/pan)"""
-        if self.ax is None:
-            return
-        
-        # Calculate the display range based on zoom
-        x_center = (self.x_min_data + self.x_max_data) / 2 + self.pan_offset[0]
-        y_center = (self.y_min_data + self.y_max_data) / 2 + self.pan_offset[1]
-        x_range = (self.x_max_data - self.x_min_data) / self.zoom_level
-        y_range = (self.y_max_data - self.y_min_data) / self.zoom_level
-        
-        self.ax.set_xlim(x_center - x_range/2, x_center + x_range/2)
-        self.ax.set_ylim(y_center + y_range/2, y_center - y_range/2)  # Y-axis is inverted
-        
-        if self.fig:
-            self.fig.canvas.draw_idle()
-    
-    def fit_to_view(self, b):
-        """Fit the view to the entire data"""
-        self.zoom_level = 1.0
-        self.pan_offset = [0, 0]
-        self.zoom_slider.value = 1.0
-        self.update_view()
-    
-    def apply_selection(self, b):
-        """Apply the selection"""
-        if len(self.selected_indices) > 0:
-            # Get the new label
-            new_label = self.new_label_input.value.strip()
-            if not new_label:
-                self.status.value = "<b>Status:</b> ⚠️ Please enter a valid label"
-                return
-                        
-            cat_col = "predicted_microenvironment"
-            
-            # Update cell type order (if a new cell type was added)
-            if new_label not in self.merged[cat_col].cat.categories:
-                self.merged[cat_col] = self.merged[cat_col].cat.add_categories([new_label])
-            # Update
-            self.merged.loc[self.selected_indices, cat_col] = new_label
- 
-            # Add new label to color map (if not already there)
-            if new_label not in self.color_map:
-                # Assign a new color
-                import matplotlib.pyplot as plt
-                colors = plt.cm.tab20(np.linspace(0, 1, 20))
-                new_color_idx = len(self.color_map) % 20
-                self.color_map[new_label] = colors[new_color_idx]
-                self.color_map[str(new_label)] = colors[new_color_idx]
-            
-            self.status.value = f"<b>Status:</b> Applied - {len(self.selected_indices)} cells changed to '{new_label}'"
+    def _rebuild_figure(self, keep_selection=True):
+        # Rebuilding the widget is the most reliable way to clear Plotly selection artifacts.
+        selected = self.selected_global_indices.copy() if keep_selection else np.array([], dtype=self.index_values.dtype)
 
-            # Update plot
-            self.create_plot()
-            
-            # Clear selection
-            self.selected_indices = []
-            self.selection_info.value = "<b>Selected:</b> 0 cells"
-    
-    def clear_selection(self, b):
-        """Clear the current selection"""
-        self.selected_indices = []
-        self.selection_info.value = "<b>Selected:</b> 0 cells"
-        
-        if self.current_selection_polygon:
-            self.current_selection_polygon.remove()
-            self.current_selection_polygon = None
-        
-        self.create_plot()
+        self.fig = _build_figure_widget_or_raise()
+        self._build_figure()
+
+        if hasattr(self, "_refresh_plot"):
+            self._refresh_plot()
+
+        self.selected_global_indices = selected
+        self._refresh_selected_overlay()
+        self._mount_figure()
+
+    def _clear_selection(self, _=None):
+        self.selected_global_indices = np.array([], dtype=self.index_values.dtype)
+        self._refresh_selected_overlay()
+        self._clear_selection_frame_only(keep_selection=False)
         self.status.value = "<b>Status:</b> Selection cleared"
-    
-    def reset_all(self, b):
-        """Reset everything"""
-        self.merged["predicted_microenvironment"] = self.original_clusters
-        self.current_clusters = self.original_clusters.copy()
-        
-        self.selected_indices = []
-        self.selection_info.value = "<b>Selected:</b> 0 cells"
-        
-        self.status.value = "<b>Status:</b> Reset complete"
-        self.create_plot()
-    
-    def run(self):
-        """Launch the UI"""
-        # Layout
-        selection_box = widgets.VBox([
-            widgets.HTML("<h3>Cell Selector: modify microenvironment</h3>"),
-            widgets.HTML("<b>Selection methods:</b>"),
-            self.selection_mode,
-            widgets.HTML("<b>Displayed microenvironments:</b>"),
-            self.new_label_input,  # Added new label input
-            self.group_selector,
-            self.zoom_slider,
-            self.point_size_slider,
-            self.alpha_slider
-        ])
-        
-        button_box = widgets.VBox([
-            widgets.HTML("<b>Actions:</b>"),
-            widgets.HBox([self.apply_btn, self.clear_selection_btn]),
-            widgets.HBox([self.reset_btn, self.fit_view_btn]),
-            widgets.HTML("<b>Data Management:</b>"),
-            widgets.HBox([self.update_anndata_btn, self.export_btn]),
-            self.selection_info,
-            self.status
-        ])
-        
-        control_panel = widgets.VBox([
-            selection_box,
-            button_box
-        ], layout=widgets.Layout(width='350px'))
-        
-        # Display everything
-        display(widgets.HBox([
-            control_panel,
-            self.output
-        ]))
-        
-        # Initial plot
-        self.create_plot()
-        
-        return self
-    
-    def update_anndata(self, b):
-        """Update the AnnData object"""
-        try:
-            # Update AnnData obs
-            self.sp_adata_ref.obs["predicted_microenvironment"] = self.merged['predicted_microenvironment'].values
-            self.merged_original['predicted_microenvironment'] = self.merged['predicted_microenvironment'].values
-            
-            # Success message
-            self.status.value = "<b>Status:</b> ✅ AnnData successfully updated!"
-            
-            # Display statistics
-            with self.output:
-                print("\n" + "="*50)
-                print("✅ AnnData Update Complete!")
-                print("="*50)
-                group_counts = self.merged["predicted_microenvironment"].value_counts()
-                print("\nCurrent group distribution:")
-                for group, count in group_counts.items():
-                    print(f"   {group}: {count} cells")
-                
-                if -1 in group_counts.index:
-                    percentage = (group_counts[-1] / len(self.merged)) * 100
-                    print(f"\n📊 Microenvironment '-1' cells: {group_counts[-1]} ({percentage:.1f}%)")
-                
-                print("\n💾 Changes have been saved to:")
-                print(f"   - sp_adata_microenvironment.obs['predicted_microenvironment']")
-                print("="*50)
-                
-        except Exception as e:
-            self.status.value = f"<b>Status:</b> ❌ Error updating AnnData: {str(e)}"
-            with self.output:
-                print(f"\n❌ Error: {e}")
-    
-    def export_data(self, b):
-        """Export data (return as variables)"""
-        try:
-            # Save to global variables (for easy access in Jupyter)
-            import __main__ as main
-            main.updated_merged_export = self.merged.copy()
-            main.updated_clusters_export = self.current_clusters.copy()
-            
-            self.status.value = "<b>Status:</b> 📦 Data exported to variables!"
-            
-            with self.output:
-                print("\n" + "="*50)
-                print("📦 Data Export Complete!")
-                print("="*50)
-                print("\nExported variables:")
-                print("   - updated_merged_export: Updated merged DataFrame")
-                print("   - updated_clusters_export: Updated clusters array")
-                print("\nYou can now use these variables in your notebook:")
-                print("   merged = updated_merged_export")
-                print("   clusters = updated_clusters_export")
-                print("="*50)
-                
-        except Exception as e:
-            self.status.value = f"<b>Status:</b> ❌ Error exporting data: {str(e)}"
-            with self.output:
-                print(f"\n❌ Error: {e}")
 
-# Usage function
-def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters):
+    def _clear_selection_frame_only(self, _=None, keep_selection=True):
+        self._rebuild_figure(keep_selection=keep_selection)
+        self.status.value = "<b>Status:</b> Selection frame cleared"
+
+    def _export_data(self, _=None):
+        raise NotImplementedError
+
+    def _update_anndata(self, _=None):
+        raise NotImplementedError
+
+    def _apply_selection(self, _=None):
+        raise NotImplementedError
+
+    def run(self):
+        raise NotImplementedError
+
+
+class LassoCellSelectorMicroenvironment(_BasePlotlySelector):
+    """High-performance microenvironment relabeling widget using Plotly ScatterGL."""
+
+    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25):
+        self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
+        self.current_clusters = self.original_clusters.copy()
+
+        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor)
+
+        self.labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
+        self.group_order = [str(v) for v in self.merged["predicted_microenvironment"].dropna().unique()]
+        self.displayed_groups = set(self.group_order)
+        self.color_map = _make_color_map(self.group_order)
+
+        self.group_selector = widgets.SelectMultiple(
+            options=self.group_order,
+            value=tuple(self.group_order),
+            description="Groups:",
+            layout=widgets.Layout(height="180px"),
+        )
+        self.new_label_input = widgets.Text(value="selected", description="New Label:")
+
+        self.apply_btn = widgets.Button(description="Apply Selection", button_style="success")
+        self.clear_btn = widgets.Button(description="Clear Selection", button_style="warning")
+        self.reset_btn = widgets.Button(description="Reset Selected Groups", button_style="danger")
+        self.update_btn = widgets.Button(description="Update AnnData", button_style="primary")
+        self.export_btn = widgets.Button(description="Export", button_style="info")
+
+        self.group_selector.observe(self._on_group_change, names="value")
+        self.apply_btn.on_click(self._apply_selection)
+        self.clear_btn.on_click(self._clear_selection)
+        self.reset_btn.on_click(self._reset_selected_groups)
+        self.update_btn.on_click(self._update_anndata)
+        self.export_btn.on_click(self._export_data)
+
+        self._refresh_plot()
+        self._set_status_header()
+
+    def _set_status_header(self):
+        self.status.value = (
+            f"<b>Status:</b> Ready | total cells={len(self.merged)}, groups={len(self.group_order)}, "
+            f"image={self.w}x{self.h}, downsample={self.downsample_factor}"
+        )
+
+    def _on_group_change(self, change):
+        self.displayed_groups = set(change["new"])
+        self._clear_selection()
+        self._refresh_plot()
+
+    def _refresh_plot(self):
+        if len(self.displayed_groups) == 0:
+            self._refresh_main_trace(np.array([], dtype=np.int64), np.array([], dtype=object))
+            self.status.value = "<b>Status:</b> No displayed groups selected"
+            return
+
+        mask = np.isin(self.labels, np.array(list(self.displayed_groups), dtype=object))
+        pos = np.where(mask)[0]
+        color_by = np.array([self.color_map.get(lbl, "rgb(120,120,120)") for lbl in self.labels], dtype=object)
+        self._refresh_main_trace(pos, color_by)
+        self.status.value = f"<b>Status:</b> Rendering {len(self.visible_positions)} / {mask.sum()} visible points"
+
+    def _apply_selection(self, _=None):
+        if len(self.selected_global_indices) == 0:
+            self.status.value = "<b>Status:</b> No selected cells"
+            return
+
+        new_label = self.new_label_input.value.strip()
+        if not new_label:
+            self.status.value = "<b>Status:</b> Enter a valid label"
+            return
+
+        cat_col = "predicted_microenvironment"
+        if pd.api.types.is_categorical_dtype(self.merged[cat_col]) and new_label not in self.merged[cat_col].cat.categories:
+            self.merged[cat_col] = self.merged[cat_col].cat.add_categories([new_label])
+
+        self.merged.loc[self.selected_global_indices, cat_col] = new_label
+
+        # Keep local numpy labels in sync.
+        selected_pos = self.merged.index.get_indexer(self.selected_global_indices)
+        selected_pos = selected_pos[selected_pos >= 0]
+        self.labels[selected_pos] = new_label
+
+        if new_label not in self.color_map:
+            extended = self.group_order + [new_label]
+            self.color_map = _make_color_map(extended)
+
+        if new_label not in self.group_order:
+            self.group_order.append(new_label)
+            self.group_selector.options = self.group_order
+
+        changed = len(self.selected_global_indices)
+        self._clear_selection()
+        self._refresh_plot()
+        self.status.value = f"<b>Status:</b> Applied new label '{new_label}' to {changed} cells"
+
+    def _reset_selected_groups(self, _=None):
+        try:
+            selected_groups = [str(v) for v in self.group_selector.value]
+            if len(selected_groups) == 0:
+                self.status.value = "<b>Status:</b> Select groups to reset"
+                return
+
+            cat_col = "predicted_microenvironment"
+            current_labels = self.merged[cat_col].astype(str)
+            mask = current_labels.isin(selected_groups)
+            target_idx = self.merged.index[mask]
+
+            if len(target_idx) == 0:
+                self.status.value = "<b>Status:</b> No cells found for selected groups"
+                return
+
+            # Revert selected-group cells back to original labels.
+            self.merged.loc[target_idx, cat_col] = self.original_clusters.loc[target_idx].values
+            self.current_clusters = self.merged[cat_col].copy()
+            self.labels = self.merged[cat_col].astype(str).to_numpy()
+
+            # Rebuild group list from current data to drop labels no longer used.
+            self.group_order = [str(v) for v in self.merged[cat_col].dropna().unique()]
+            self.color_map = _make_color_map(self.group_order)
+            self.group_selector.options = self.group_order
+            self.group_selector.value = tuple(self.group_order)
+            self.displayed_groups = set(self.group_order)
+
+            changed = len(target_idx)
+            self._clear_selection()
+            self._refresh_plot()
+            self.status.value = f"<b>Status:</b> Reset selected groups for {changed} cells"
+        except Exception as exc:
+            self.status.value = f"<b>Status:</b> Reset failed: {exc}"
+
+    def _update_anndata(self, _=None):
+        self.sp_adata_ref.obs["predicted_microenvironment"] = self.merged["predicted_microenvironment"].values
+        self.merged_original["predicted_microenvironment"] = self.merged["predicted_microenvironment"].values
+        self.status.value = "<b>Status:</b> AnnData updated"
+
+    def _export_data(self, _=None):
+        import __main__ as main
+
+        main.updated_merged_export = self.merged.copy()
+        main.updated_clusters_export = self.current_clusters.copy()
+        self.status.value = "<b>Status:</b> Exported to updated_merged_export / updated_clusters_export"
+
+    def run(self):
+        controls = widgets.VBox(
+            [
+                widgets.HTML("<h3>Microenvironment selector</h3>"),
+                self.selection_mode,
+                self.group_selector,
+                self.new_label_input,
+                self.zoom_slider,
+                self.point_size_slider,
+                self.opacity_slider,
+                widgets.HBox([self.apply_btn, self.clear_btn]),
+                widgets.HBox([self.reset_btn, self.update_btn, self.export_btn]),
+                self.selection_info,
+                self.status,
+            ],
+            layout=widgets.Layout(width="360px", min_width="360px"),
+        )
+
+        self._mount_figure()
+
+        ui = widgets.HBox([controls, self.output], layout=widgets.Layout(width="100%", align_items="flex-start"))
+        display(ui)
+        return self
+
+
+class LassoCellSelectorCellType(_BasePlotlySelector):
+    """High-performance cell-type relabeling widget using Plotly ScatterGL."""
+
+    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25):
+        self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
+        self.current_clusters = self.original_clusters.copy()
+
+        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor)
+
+        self.microenv_labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
+        self.celltype_labels = self.merged["predicted_cell_type"].astype(str).to_numpy()
+
+        self.microenv_order = [str(v) for v in self.merged["predicted_microenvironment"].dropna().unique()]
+        self.cell_type_order = [str(v) for v in self.merged["predicted_cell_type"].dropna().unique()]
+
+        self.color_map = _make_color_map(self.microenv_order)
+
+        default_ct = self.cell_type_order[0] if self.cell_type_order else None
+        default_me = tuple(self.microenv_order[: min(3, len(self.microenv_order))])
+
+        self.cell_type_selector = widgets.Dropdown(
+            options=self.cell_type_order,
+            value=default_ct,
+            description="Target CT:",
+            layout=widgets.Layout(width="320px"),
+        )
+        self.microenv_selector = widgets.SelectMultiple(
+            options=self.microenv_order,
+            value=default_me,
+            description="Microenv:",
+            layout=widgets.Layout(height="170px"),
+        )
+        self.new_cell_type_input = widgets.Text(value="selected_cell_type", description="New CT:")
+
+        self.apply_btn = widgets.Button(description="Apply Selection", button_style="success")
+        self.clear_btn = widgets.Button(description="Clear Selection", button_style="warning")
+        self.reset_btn = widgets.Button(description="Reset Original Data", button_style="danger")
+        self.update_btn = widgets.Button(description="Update AnnData", button_style="primary")
+        self.export_btn = widgets.Button(description="Export", button_style="info")
+
+        self.cell_type_selector.observe(self._on_filter_change, names="value")
+        self.microenv_selector.observe(self._on_filter_change, names="value")
+        self.apply_btn.on_click(self._apply_selection)
+        self.clear_btn.on_click(self._clear_selection)
+        self.reset_btn.on_click(self._reset_all)
+        self.update_btn.on_click(self._update_anndata)
+        self.export_btn.on_click(self._export_data)
+
+        self._refresh_plot()
+        self._set_status_header()
+
+    def _set_status_header(self):
+        self.status.value = (
+            f"<b>Status:</b> Ready | total cells={len(self.merged)}, cell types={len(self.cell_type_order)}, "
+            f"microenv={len(self.microenv_order)}, image={self.w}x{self.h}, downsample={self.downsample_factor}"
+        )
+
+    def _on_filter_change(self, _):
+        self._clear_selection()
+        self._refresh_plot()
+
+    def _refresh_plot(self):
+        target_ct = self.cell_type_selector.value
+        microenvs = list(self.microenv_selector.value)
+
+        if (target_ct is None) or (len(microenvs) == 0):
+            self._refresh_main_trace(np.array([], dtype=np.int64), np.array([], dtype=object))
+            self.status.value = "<b>Status:</b> Select target cell type and at least one microenvironment"
+            return
+
+        mask = (self.celltype_labels == str(target_ct)) & np.isin(self.microenv_labels, np.array(microenvs, dtype=object))
+        pos = np.where(mask)[0]
+        color_by = np.array([self.color_map.get(lbl, "rgb(120,120,120)") for lbl in self.microenv_labels], dtype=object)
+        self._refresh_main_trace(pos, color_by)
+        self.status.value = f"<b>Status:</b> Rendering {len(self.visible_positions)} / {mask.sum()} visible points"
+
+    def _apply_selection(self, _=None):
+        if len(self.selected_global_indices) == 0:
+            self.status.value = "<b>Status:</b> No selected cells"
+            return
+
+        new_cell_type = self.new_cell_type_input.value.strip()
+        if not new_cell_type:
+            self.status.value = "<b>Status:</b> Enter a valid cell type"
+            return
+
+        cat_col = "predicted_cell_type"
+        if pd.api.types.is_categorical_dtype(self.merged[cat_col]) and new_cell_type not in self.merged[cat_col].cat.categories:
+            self.merged[cat_col] = self.merged[cat_col].cat.add_categories([new_cell_type])
+
+        self.merged.loc[self.selected_global_indices, cat_col] = new_cell_type
+
+        selected_pos = self.merged.index.get_indexer(self.selected_global_indices)
+        selected_pos = selected_pos[selected_pos >= 0]
+        self.celltype_labels[selected_pos] = new_cell_type
+
+        if new_cell_type not in self.cell_type_order:
+            self.cell_type_order.append(new_cell_type)
+            self.cell_type_selector.options = self.cell_type_order
+
+        changed = len(self.selected_global_indices)
+        self._clear_selection()
+        self._refresh_plot()
+        self.status.value = f"<b>Status:</b> Applied new cell type '{new_cell_type}' to {changed} cells"
+
+    def _reset_all(self, _=None):
+        if "predicted_cell_type" in self.merged_original.columns:
+            self.merged["predicted_cell_type"] = self.merged_original["predicted_cell_type"].copy()
+            self.celltype_labels = self.merged["predicted_cell_type"].astype(str).to_numpy()
+        
+        # Reset to original clusters/microenvironments
+        self.merged["predicted_microenvironment"] = self.original_clusters
+        self.microenv_labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
+        
+        # Reset cell type and microenvironment order to original
+        self.cell_type_order = [str(v) for v in self.merged["predicted_cell_type"].dropna().unique()]
+        self.microenv_order = [str(v) for v in self.original_clusters.dropna().unique()]
+        self.color_map = _make_color_map(self.microenv_order)
+        
+        self.cell_type_selector.options = self.cell_type_order
+        self.microenv_selector.options = self.microenv_order
+        
+        self.current_clusters = self.original_clusters.copy()
+        self._clear_selection()
+        self._refresh_plot()
+        self.status.value = "<b>Status:</b> Reset complete - all labels and groups restored"
+
+    def _update_anndata(self, _=None):
+        self.sp_adata_ref.obs["predicted_cell_type"] = self.merged["predicted_cell_type"].values
+        self.merged_original["predicted_cell_type"] = self.merged["predicted_cell_type"].values
+        self.status.value = "<b>Status:</b> AnnData updated"
+
+    def _export_data(self, _=None):
+        import __main__ as main
+
+        main.updated_merged_celltype_export = self.merged.copy()
+        main.updated_clusters_celltype_export = self.current_clusters.copy()
+        self.status.value = "<b>Status:</b> Exported to updated_merged_celltype_export / updated_clusters_celltype_export"
+
+    def run(self):
+        controls = widgets.VBox(
+            [
+                widgets.HTML("<h3>Cell type selector</h3>"),
+                self.selection_mode,
+                self.cell_type_selector,
+                self.new_cell_type_input,
+                self.microenv_selector,
+                self.zoom_slider,
+                self.point_size_slider,
+                self.opacity_slider,
+                widgets.HBox([self.apply_btn, self.clear_btn]),
+                widgets.HBox([self.reset_btn, self.update_btn, self.export_btn]),
+                self.selection_info,
+                self.status,
+            ],
+            layout=widgets.Layout(width="360px", min_width="360px"),
+        )
+
+        self._mount_figure()
+
+        ui = widgets.HBox([controls, self.output], layout=widgets.Layout(width="100%", align_items="flex-start"))
+        display(ui)
+        return self
+
+
+def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25):
+    """Launch high-performance microenvironment selector."""
     selector = LassoCellSelectorMicroenvironment(
-        sp_adata,
-        merged,
-        lib_id,
-        clusters
+        sp_adata=sp_adata,
+        merged_df=merged,
+        lib_id=lib_id,
+        clusters=clusters,
+        downsample_factor=downsample_factor,
     )
     return selector.run()
 
-    
-class LassoCellSelectorCellType:
-    def __init__(self, sp_adata, merged_df, lib_id, clusters):
-        self.sp_adata = sp_adata.copy()
-        self.sp_adata_ref = sp_adata
-        self.merged = merged_df.copy()
-        self.merged_original = merged_df
-        self.lib_id = lib_id
-        self.original_clusters = clusters.copy()
-        self.current_clusters = clusters.copy()
-        
-        # Suppress matplotlib figure management warnings
-        plt.rcParams['figure.max_open_warning'] = 50
-        
-        # Image data
-        self.hires_img = sp_adata.uns["spatial"][lib_id]["images"]["0.5_mpp_150_buffer"]
-        self.h, self.w = self.hires_img.shape[:2]
-        
-        # Get Cell type and Microenvironment information
-        self.cell_type_order = self.merged["predicted_cell_type"].dropna().unique()
-        self.microenv_order = self.merged["predicted_microenvironment"].dropna().unique()
-        
-        # Coordinate range
-        self.x_min_data = self.merged["x"].min()
-        self.x_max_data = self.merged["x"].max()
-        self.y_min_data = self.merged["y"].min()
-        self.y_max_data = self.merged["y"].max()
-        
-        # Selection-related variables
-        self.lasso_selector = None
-        self.rect_selector = None
-        self.selected_path = None
-        self.selected_indices = []
-        self.current_selection_polygon = None
-        self.selection_highlight = None  # For selection highlighting
-        
-        # Display settings
-        self.zoom_level = 1.0
-        self.pan_offset = [0, 0]
-        
-        # Plot elements
-        self.fig = None
-        self.ax = None
-        self.scatter_plots = {}
-        
-        print(f"=== Data Info ===")
-        print(f"Total cells: {len(self.merged)}")
-        print(f"Cell types: {len(self.cell_type_order)}")
-        print(f"Microenvironments: {len(self.microenv_order)}")
-        
-        # Color settings
-        self.setup_colors()
-        
-        # Create UI
-        self.create_ui()
-        
-    def setup_colors(self):
-        """Set up colors and markers"""
-        palette = sns.color_palette("tab20", n_colors=max(20, len(self.microenv_order)))
-        
-        self.color_map = {}
-        for i, microenv in enumerate(self.microenv_order):
-            color = palette[i % len(palette)]
-            self.color_map[microenv] = color
-            self.color_map[str(microenv)] = color
-    
-    def create_ui(self):
-        """Create UI components"""
-        
-        # Selection mode
-        self.selection_mode = widgets.RadioButtons(
-            options=['Lasso', 'Rectangle'],
-            value='Lasso',
-            style={'description_width': 'initial'}
-        )
-        self.selection_mode.observe(self.on_mode_change, names='value')
-        
-        # Cell type selection (single-select)
-        self.cell_type_selector = widgets.Dropdown(
-            options=[str(ct) for ct in self.cell_type_order],
-            value=str(self.cell_type_order[0]) if len(self.cell_type_order) > 0 else None,
-            description='Target Cell Type:',
-            style={'description_width': 'initial'},
-            layout=widgets.Layout(width='300px')
-        )
-        
-        # Microenvironment display selection (multi-select)
-        self.microenv_selector = widgets.SelectMultiple(
-            options=[str(me) for me in self.microenv_order],
-            value=[str(me) for me in self.microenv_order][:min(3, len(self.microenv_order))],
-            description='Display Microenvs:',
-            style={'description_width': 'initial'},
-            layout=widgets.Layout(height='150px', width='300px')
-        )
-        self.microenv_selector.observe(self.on_microenv_display_change, names='value')
-        
-        # New cell type name input
-        self.new_cell_type_input = widgets.Text(
-            value='selected_cell_type',
-            placeholder='Enter new cell type name',
-            description='New Cell Type:',
-            style={'description_width': 'initial'},
-            layout=widgets.Layout(width='300px')
-        )
 
-        # Zoom controls
-        self.zoom_slider = widgets.FloatSlider(
-            value=1.0, min=0.5, max=10.0, step=0.1,
-            description='Zoom:',
-            readout_format='.1f'
-        )
-        self.zoom_slider.observe(self.on_zoom_change, names='value')
-        
-        # Buttons
-        self.apply_btn = widgets.Button(
-            description='Apply Selection',
-            button_style='success',
-            icon='check'
-        )
-        self.clear_selection_btn = widgets.Button(
-            description='Clear Selection',
-            button_style='warning',
-            icon='times'
-        )
-        self.reset_btn = widgets.Button(
-            description='Reset All',
-            button_style='danger',
-            icon='refresh'
-        )
-        self.fit_view_btn = widgets.Button(
-            description='Fit to View',
-            button_style='info',
-            icon='expand'
-        )
-        self.update_anndata_btn = widgets.Button(
-            description='Update AnnData',
-            button_style='primary',
-            icon='save',
-            tooltip='Update the original AnnData object with current changes'
-        )
-        self.export_btn = widgets.Button(
-            description='Export Data',
-            button_style='info',
-            icon='download',
-            tooltip='Export updated merged DataFrame and clusters'
-        )
-        
-        self.apply_btn.on_click(self.apply_selection)
-        self.clear_selection_btn.on_click(self.clear_selection)
-        self.reset_btn.on_click(self.reset_all)
-        self.fit_view_btn.on_click(self.fit_to_view)
-        self.update_anndata_btn.on_click(self.update_anndata)
-        self.export_btn.on_click(self.export_data)
-        
-        # Status
-        self.status = widgets.HTML(value="<b>Status:</b> Ready")
-        self.selection_info = widgets.HTML(value="<b>Selected:</b> 0 cells")
-        
-        # Output area
-        self.output = widgets.Output()
-        
-        # Point size adjustment
-        self.point_size_slider = widgets.FloatSlider(
-            value=3.0, min=0.1, max=10.0, step=0.1,
-            description='Point Size:',
-            readout_format='.1f'
-        )
-        self.point_size_slider.observe(self.on_point_size_change, names='value')
-        
-        # Opacity adjustment
-        self.alpha_slider = widgets.FloatSlider(
-            value=0.8, min=0.1, max=1.0, step=0.1,
-            description='Opacity:',
-            readout_format='.1f'
-        )
-        self.alpha_slider.observe(self.on_alpha_change, names='value')
-    
-    def create_plot(self):
-        """Create the main plot"""
-        with self.output:
-            clear_output(wait=True)
-            
-            # Disable selectors
-            self.cleanup_selectors()
-            
-            # Close existing figure if any
-            if self.fig is not None:
-                plt.close(self.fig)
-                self.fig = None
-                self.ax = None
-            
-            # Close extra figures
-            plt.close('all')
-            
-            # Create a new figure - adjust size
-            self.fig, self.ax = plt.subplots(figsize=(8, 8))
-            
-            # Background image
-            self.ax.imshow(self.hires_img, extent=[0, self.w, self.h, 0], alpha=0.8)
-            
-            # Plot only the cells that meet the conditions for both displayed microenvironment and selected cell type
-            self.scatter_plots = {}
-            displayed_microenvs = list(self.microenv_selector.value)
-            selected_cell_type = self.cell_type_selector.value
-            
-            # Display only cells of the selected cell type within the displayed microenvironments
-            if selected_cell_type and displayed_microenvs:
-                for microenv in displayed_microenvs:
-                    # Condition: specified microenvironment AND specified cell type
-                    microenv_data = self.merged[
-                        ((self.merged["predicted_microenvironment"] == microenv) | 
-                         (self.merged["predicted_microenvironment"].astype(str) == str(microenv))) &
-                        ((self.merged["predicted_cell_type"] == selected_cell_type) | 
-                         (self.merged["predicted_cell_type"].astype(str) == str(selected_cell_type)))
-                    ]
-                    
-                    if len(microenv_data) > 0:
-                        scatter = self.ax.scatter(
-                            microenv_data["x"],
-                            microenv_data["y"],
-                            c=[self.color_map.get(microenv, 'gray')],
-                            s=self.point_size_slider.value,
-                            alpha=self.alpha_slider.value,
-                            label=f'ME: {str(microenv)}',
-                            picker=True,
-                            rasterized=True
-                        )
-                        self.scatter_plots[f'{microenv}_{selected_cell_type}'] = scatter
-            
-            # Axis settings
-            self.update_view()
-            
-            # Legend
-            if len(self.scatter_plots) <= 20:
-                self.ax.legend(loc='upper right', fontsize=8, framealpha=0.8)
-            
-            self.ax.set_aspect('equal')
-            self.ax.axis('off')
-            self.ax.set_title(f'Cell Type Selector - Target: {selected_cell_type}', fontsize=14, pad=20)
-            
-            # Set up selectors
-            self.setup_selector()
-            
-            plt.tight_layout()
-            plt.show()
-    
-    def cleanup_selectors(self):
-        """Properly clean up selectors"""
-        if hasattr(self, 'lasso_selector') and self.lasso_selector is not None:
-            try:
-                self.lasso_selector.disconnect_events()
-            except:
-                pass
-            self.lasso_selector = None
-            
-        if hasattr(self, 'rect_selector') and self.rect_selector is not None:
-            try:
-                self.rect_selector.set_active(False)
-            except:
-                pass
-            self.rect_selector = None
-    
-    def setup_selector(self):
-        """Set up selection tools"""
-        if self.selection_mode.value == 'Lasso':
-            self.lasso_selector = LassoSelector(
-                self.ax,
-                onselect=self.on_lasso_select,
-                useblit=True,
-                button=[1],  # Left click
-            )
-        elif self.selection_mode.value == 'Rectangle':
-            self.rect_selector = RectangleSelector(
-                self.ax,
-                self.on_rect_select,
-                useblit=True,
-                button=[1],
-                minspanx=5,
-                minspany=5,
-                spancoords='pixels',
-                interactive=True
-            )
-    
-    def on_lasso_select(self, verts):
-        """Callback for lasso selection"""
-        # Create a path
-        self.selected_path = Path(verts)
-        
-        # Consider only data for currently displayed groups
-        displayed_microenvs = list(self.microenv_selector.value)
-        selected_cell_type = self.cell_type_selector.value
-        
-        if not selected_cell_type or not displayed_microenvs:
-            self.selected_indices = []
-            self.selection_info.value = "<b>Selected:</b> 0 cells (No cell type or microenvironment selected)"
-            return
-        
-        mask_display = (
-            (self.merged["predicted_microenvironment"].isin(displayed_microenvs) | 
-             self.merged["predicted_microenvironment"].astype(str).isin(displayed_microenvs)) &
-            ((self.merged["predicted_cell_type"] == selected_cell_type) | 
-             (self.merged["predicted_cell_type"].astype(str) == str(selected_cell_type)))
-        )
-        
-        displayed_data = self.merged[mask_display]
-        
-        # Determine points inside the path
-        if len(displayed_data) > 0:
-            points = displayed_data[['x', 'y']].values
-            inside = self.selected_path.contains_points(points)
-            self.selected_indices = displayed_data[inside].index.tolist()
-        else:
-            self.selected_indices = []
-        
-        # Visualize the selected area
-        if self.current_selection_polygon:
-            self.current_selection_polygon.remove()
-        
-        self.current_selection_polygon = Polygon(
-            verts, fill=False, edgecolor='yellow',
-            linewidth=2, linestyle='--', alpha=0.8
-        )
-        self.ax.add_patch(self.current_selection_polygon)
-        
-        # Highlight selected points
-        if len(self.selected_indices) > 0:
-            selected_data = self.merged.loc[self.selected_indices]
-            # Remove existing highlight if any
-            if hasattr(self, 'selection_highlight') and self.selection_highlight:
-                try:
-                    self.selection_highlight.remove()
-                except:
-                    pass
-            
-            # Add new highlight
-            self.selection_highlight = self.ax.scatter(
-                selected_data["x"],
-                selected_data["y"],
-                c='yellow',
-                s=self.point_size_slider.value * 3,
-                alpha=1.0,
-                marker='o',
-                edgecolors='red',
-                linewidths=1.0,
-                zorder=1000  # Display on top
-            )
-        
-        self.fig.canvas.draw_idle()
-        
-        # Update status
-        self.selection_info.value = f"<b>Selected:</b> {len(self.selected_indices)} cells (CT: {selected_cell_type})"
-    
-    def on_rect_select(self, eclick, erelease):
-        """Callback for rectangle selection"""
-        x1, y1 = eclick.xdata, eclick.ydata
-        x2, y2 = erelease.xdata, erelease.ydata
-        
-        if None in [x1, y1, x2, y2]:
-            return
-        
-        x_min, x_max = min(x1, x2), max(x1, x2)
-        y_min, y_max = min(y1, y2), max(y1, y2)
-        
-        # Consider only data for currently displayed groups
-        displayed_microenvs = list(self.microenv_selector.value)
-        selected_cell_type = self.cell_type_selector.value
-        
-        if not selected_cell_type or not displayed_microenvs:
-            self.selected_indices = []
-            self.selection_info.value = "<b>Selected:</b> 0 cells (No cell type or microenvironment selected)"
-            return
-        
-        # Select points within the coordinate range
-        mask = (
-            (self.merged["x"] >= x_min) & 
-            (self.merged["x"] <= x_max) &
-            (self.merged["y"] >= y_min) & 
-            (self.merged["y"] <= y_max)
-        )
-        
-        # Combine with display conditions
-        mask_display = (
-            (self.merged["predicted_microenvironment"].isin(displayed_microenvs) | 
-             self.merged["predicted_microenvironment"].astype(str).isin(displayed_microenvs)) &
-            ((self.merged["predicted_cell_type"] == selected_cell_type) | 
-             (self.merged["predicted_cell_type"].astype(str) == str(selected_cell_type)))
-        )
-        mask = mask & mask_display
-        
-        self.selected_indices = self.merged[mask].index.tolist()
-        
-        # Highlight selected points
-        if len(self.selected_indices) > 0:
-            selected_data = self.merged.loc[self.selected_indices]
-            # Remove existing highlight if any
-            if hasattr(self, 'selection_highlight') and self.selection_highlight:
-                try:
-                    self.selection_highlight.remove()
-                except:
-                    pass
-            
-            # Add new highlight
-            self.selection_highlight = self.ax.scatter(
-                selected_data["x"],
-                selected_data["y"],
-                c='yellow',
-                s=self.point_size_slider.value * 3,
-                alpha=1.0,
-                marker='o',
-                edgecolors='red',
-                linewidths=1.0,
-                zorder=1000  # Display on top
-            )
-            
-            self.fig.canvas.draw_idle()
-        
-        # Update status
-        self.selection_info.value = f"<b>Selected:</b> {len(self.selected_indices)} cells (CT: {selected_cell_type})"
-    
-    def on_mode_change(self, change):
-        """When selection mode is changed"""
-        import time
-        time.sleep(0.1)  # Wait a bit
-        self.create_plot()
-    
-    def on_microenv_display_change(self, change):
-        """When displayed microenvironments are changed"""
-        import time
-        time.sleep(0.1)  # Wait a bit
-        self.create_plot()
-    
-    def on_zoom_change(self, change):
-        """When zoom is changed"""
-        self.zoom_level = change['new']
-        self.update_view()
-    
-    def on_point_size_change(self, change):
-        """When point size is changed"""
-        for scatter in self.scatter_plots.values():
-            scatter.set_sizes([change['new']])
-        if self.fig:
-            self.fig.canvas.draw_idle()
-    
-    def on_alpha_change(self, change):
-        """When opacity is changed"""
-        for scatter in self.scatter_plots.values():
-            scatter.set_alpha(change['new'])
-        if self.fig:
-            self.fig.canvas.draw_idle()
-    
-    def update_view(self):
-        """Update the view (zoom/pan)"""
-        if self.ax is None:
-            return
-        
-        # Calculate the display range based on zoom
-        x_center = (self.x_min_data + self.x_max_data) / 2 + self.pan_offset[0]
-        y_center = (self.y_min_data + self.y_max_data) / 2 + self.pan_offset[1]
-        x_range = (self.x_max_data - self.x_min_data) / self.zoom_level
-        y_range = (self.y_max_data - self.y_min_data) / self.zoom_level
-        
-        self.ax.set_xlim(x_center - x_range/2, x_center + x_range/2)
-        self.ax.set_ylim(y_center + y_range/2, y_center - y_range/2)  # Y-axis is inverted
-        
-        if self.fig:
-            self.fig.canvas.draw_idle()
-    
-    def fit_to_view(self, b):
-        """Fit the view to the entire data"""
-        self.zoom_level = 1.0
-        self.pan_offset = [0, 0]
-        self.zoom_slider.value = 1.0
-        self.update_view()
-    
-    def apply_selection(self, b):
-        """Apply the selection"""
-        if len(self.selected_indices) > 0:
-            # Get the new cell type name
-            new_cell_type = self.new_cell_type_input.value.strip()
-            if not new_cell_type:
-                self.status.value = "<b>Status:</b> ⚠️ Please enter a valid cell type name"
-                return
-            
-            # Update cell type order (if a new cell type was added)
-            if new_cell_type not in self.cell_type_order:
-                self.cell_type_order = np.append(self.cell_type_order, new_cell_type)
-                # Update dropdown options
-                self.cell_type_selector.options = [str(ct) for ct in self.cell_type_order]
-
-            cat_col = "predicted_cell_type"
-            if new_cell_type not in self.merged[cat_col].cat.categories:
-                self.merged[cat_col] = self.merged[cat_col].cat.add_categories([new_cell_type])
-            
-            self.merged.loc[self.selected_indices, cat_col] = new_cell_type
-                        
-            self.status.value = f"<b>Status:</b> Applied - {len(self.selected_indices)} cells changed to '{new_cell_type}'"
-
-            # Clear selection
-            self.selected_indices = []
-            self.selection_info.value = "<b>Selected:</b> 0 cells"
-            
-            # Update plot
-            self.create_plot()
-    
-    def clear_selection(self, b):
-        """Clear the current selection"""
-        self.selected_indices = []
-        self.selection_info.value = "<b>Selected:</b> 0 cells"
-        
-        # Remove selection polygon
-        if self.current_selection_polygon:
-            try:
-                self.current_selection_polygon.remove()
-            except:
-                pass
-            self.current_selection_polygon = None
-        
-        # Remove selection highlight
-        if hasattr(self, 'selection_highlight') and self.selection_highlight:
-            try:
-                self.selection_highlight.remove()
-            except:
-                pass
-            self.selection_highlight = None
-        
-        # Redraw the plot, but only update the selection part
-        if self.fig:
-            self.fig.canvas.draw_idle()
-        
-        self.status.value = "<b>Status:</b> Selection cleared"
-    
-    def reset_all(self, b):
-        """Reset everything"""
-        # Restore cell type info from original clusters
-        if 'predicted_cell_type' in self.merged_original.columns:
-            self.merged["predicted_cell_type"] = self.merged_original["predicted_cell_type"].copy()
-        
-        self.current_clusters = self.original_clusters.copy()
-        
-        self.selected_indices = []
-        self.selection_info.value = "<b>Selected:</b> 0 cells"
-        
-        self.status.value = "<b>Status:</b> Reset complete"
-        self.create_plot()
-    
-    def run(self):
-        """Launch the UI"""
-        # Layout
-        selection_box = widgets.VBox([
-            widgets.HTML("<h3>Selector for cell rename</h3>"),
-            widgets.HTML("<b>Selection methods:</b>"),
-            self.selection_mode,
-            widgets.HTML("<b>Target Cell Type:</b>"),
-            self.cell_type_selector,
-            widgets.HTML("<b>New Cell Type Name:</b>"),
-            self.new_cell_type_input,
-            widgets.HTML("<b>Display Microenvironments:</b>"),
-            self.microenv_selector,
-            self.zoom_slider,
-            self.point_size_slider,
-            self.alpha_slider
-        ])
-        
-        button_box = widgets.VBox([
-            widgets.HTML("<b>Actions:</b>"),
-            widgets.HBox([self.apply_btn, self.clear_selection_btn]),
-            widgets.HBox([self.reset_btn, self.fit_view_btn]),
-            widgets.HTML("<b>Data Management:</b>"),
-            widgets.HBox([self.update_anndata_btn, self.export_btn]),
-            self.selection_info,
-            self.status
-        ])
-        
-        control_panel = widgets.VBox([
-            selection_box,
-            button_box
-        ], layout=widgets.Layout(width='350px'))
-        
-        # Display everything
-        main_ui = widgets.HBox([
-            control_panel,
-            self.output
-        ])
-        
-        display(main_ui)
-        
-        # Wait a bit before creating the plot
-        import time
-        time.sleep(0.1)
-        
-        # Initial plot
-        self.create_plot()
-        
-        return self
-    
-    def update_anndata(self, b):
-        """Update the AnnData object"""
-        try:
-            # Update AnnData obs
-            self.sp_adata_ref.obs["predicted_cell_type"] = self.merged['predicted_cell_type'].values            
-            # Update the original merged DataFrame (if passed by reference)
-            self.merged_original['predicted_cell_type'] = self.merged['predicted_cell_type'].values
-            
-            # Success message
-            self.status.value = "<b>Status:</b> ✅ AnnData successfully updated!"
-            
-            # Display statistics
-            with self.output:
-                print("\n" + "="*50)
-                print("✅ AnnData Update Complete!")
-                print("="*50)
-                cell_type_counts = self.merged["predicted_cell_type"].value_counts()
-                print("\nCurrent cell type distribution:")
-                for cell_type, count in cell_type_counts.items():
-                    print(f"   {cell_type}: {count} cells")
-                
-                print(f"\n📊 Total unique cell types: {len(cell_type_counts)}")
-                
-                print("\n💾 Changes have been saved to:")
-                print(f"   - sp_adata_microenvironment.obs['predicted_cell_type']")
-                print("="*50)
-                
-        except Exception as e:
-            self.status.value = f"<b>Status:</b> ❌ Error updating AnnData: {str(e)}"
-            with self.output:
-                print(f"\n❌ Error: {e}")
-    
-    def export_data(self, b):
-        """Export data (return as variables)"""
-        try:
-            # Save to global variables (for easy access in Jupyter)
-            import __main__ as main
-            main.updated_merged_celltype_export = self.merged.copy()
-            main.updated_clusters_celltype_export = self.current_clusters.copy()
-            
-            self.status.value = "<b>Status:</b> 📦 Data exported to variables!"
-            
-            with self.output:
-                print("\n" + "="*50)
-                print("📦 Data Export Complete!")
-                print("="*50)
-                print("\nExported variables:")
-                print("   - updated_merged_celltype_export: Updated merged DataFrame")
-                print("   - updated_clusters_celltype_export: Updated clusters array")
-                print("\nYou can now use these variables in your notebook:")
-                print("   merged = updated_merged_celltype_export")
-                print("   clusters = updated_clusters_celltype_export")
-                print("="*50)
-                
-        except Exception as e:
-            self.status.value = f"<b>Status:</b> ❌ Error exporting data: {str(e)}"
-            with self.output:
-                print(f"\n❌ Error: {e}")
-
-
-# Usage function
-def lasso_selection_cell_type(sp_adata, merged, lib_id, clusters):
-    """
-    Launch a lasso selection widget for cell type modification.
-    
-    Parameters:
-    - sp_adata: AnnData object
-    - merged: Merged DataFrame (including predicted_cell_type, predicted_microenvironment, x, y columns)
-    - lib_id: Library ID
-    - clusters: Cluster information
-    
-    Returns:
-    - LassoCellSelectorCellType: The selector object
-    """
+def lasso_selection_cell_type(sp_adata, merged, lib_id, clusters, downsample_factor=0.25):
+    """Launch high-performance cell type selector."""
     selector = LassoCellSelectorCellType(
-        sp_adata,
-        merged,
-        lib_id,
-        clusters
+        sp_adata=sp_adata,
+        merged_df=merged,
+        lib_id=lib_id,
+        clusters=clusters,
+        downsample_factor=downsample_factor,
     )
     return selector.run()

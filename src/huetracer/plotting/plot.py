@@ -21,6 +21,189 @@ import re
 from itertools import cycle
 
 
+def _normalize_plotly_image_uint8(img):
+    """Convert image arrays to uint8 for Plotly image display."""
+    if img.dtype in (np.float32, np.float64):
+        return (np.clip(img, 0, 1) * 255).astype(np.uint8)
+    if img.dtype != np.uint8:
+        return img.astype(np.uint8)
+    return img
+
+
+def _downsample_plotly_background(img, factor):
+    """Downsample only the background image while preserving point coordinates."""
+    if factor >= 1.0:
+        return _normalize_plotly_image_uint8(img)
+
+    img_uint8 = _normalize_plotly_image_uint8(img)
+    height, width = img_uint8.shape[:2]
+    new_width = max(1, int(width * factor))
+    new_height = max(1, int(height * factor))
+    return np.array(Image.fromarray(img_uint8).resize((new_width, new_height), Image.LANCZOS))
+
+
+def plot_spatial_plotly_fast(
+    adata,
+    color_col="predicted_microenvironment",
+    basis="spatial_cropped_150_buffer",
+    lib_id=None,
+    img_key="0.5_mpp_150_buffer",
+    downsample_img=0.25,
+    max_points=250_000,
+    point_size=3,
+    point_opacity=0.6,
+    title=None,
+    groups=None,
+    random_seed=0,
+):
+    """Render a faster interactive spatial plot using Plotly ScatterGL.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Spatial AnnData object.
+    color_col : str
+        Column in ``adata.obs`` used for categorical coloring.
+    basis : str
+        Key in ``adata.obsm`` containing 2D spatial coordinates.
+    lib_id : str or None
+        Spatial library id. If None, the first available library is used.
+    img_key : str
+        Background image key inside ``adata.uns['spatial'][lib_id]['images']``.
+    downsample_img : float
+        Background image downsampling factor. Default is 0.25.
+    max_points : int
+        Maximum number of rendered points. Default is 250_000.
+    point_size : float
+        Marker size.
+    point_opacity : float
+        Marker opacity.
+    title : str or None
+        Figure title. If None, a default title based on ``color_col`` is used.
+    groups : sequence or None
+        Optional subset of categorical groups to render.
+    random_seed : int
+        Seed used when sampling points.
+    """
+    if lib_id is None:
+        lib_id = list(adata.uns["spatial"].keys())[0]
+
+    if color_col not in adata.obs.columns:
+        raise KeyError(f"'{color_col}' not found in adata.obs")
+
+    if basis not in adata.obsm:
+        raise KeyError(f"'{basis}' not found in adata.obsm")
+
+    if img_key not in adata.uns["spatial"][lib_id]["images"]:
+        raise KeyError(f"'{img_key}' not found in adata.uns['spatial'][lib_id]['images']")
+
+    scale_key = f"tissue_{img_key}_scalef"
+    scale_factor = adata.uns["spatial"][lib_id].get("scalefactors", {}).get(scale_key, 1.0)
+
+    coords = np.asarray(adata.obsm[basis], dtype=float) * scale_factor
+    if coords.shape[1] < 2:
+        raise ValueError(f"adata.obsm['{basis}'] must contain at least 2 columns")
+
+    labels = adata.obs[color_col].astype(str).fillna("NA")
+    if groups is not None:
+        group_set = {str(group) for group in groups}
+        group_mask = labels.isin(group_set).to_numpy()
+    else:
+        group_mask = np.ones(len(labels), dtype=bool)
+
+    all_group_indices = np.flatnonzero(group_mask)
+    if len(all_group_indices) == 0:
+        raise ValueError("No points available for the requested groups")
+
+    valid_indices = all_group_indices
+    if len(valid_indices) > max_points:
+        rng = np.random.default_rng(random_seed)
+        valid_indices = np.sort(rng.choice(valid_indices, size=max_points, replace=False))
+
+    x = coords[valid_indices, 0].astype(float)
+    y = coords[valid_indices, 1].astype(float)
+    sampled_labels = labels.iloc[valid_indices].to_numpy()
+
+    all_x = coords[all_group_indices, 0].astype(float)
+    all_y = coords[all_group_indices, 1].astype(float)
+
+    raw_img = adata.uns["spatial"][lib_id]["images"][img_key]
+    original_height, original_width = raw_img.shape[:2]
+    display_img = _downsample_plotly_background(raw_img, downsample_img)
+    display_height, display_width = display_img.shape[:2]
+
+    tolerance = 2.0
+    coords_fit_image = (
+        np.nanmin(all_x) >= -tolerance
+        and np.nanmax(all_x) <= original_width + tolerance
+        and np.nanmin(all_y) >= -tolerance
+        and np.nanmax(all_y) <= original_height + tolerance
+    )
+
+    if coords_fit_image:
+        image_x0 = 0.0
+        image_y0 = 0.0
+    else:
+        image_x0 = float(np.nanmin(all_x))
+        image_y0 = float(np.nanmin(all_y))
+
+    image_x1 = image_x0 + float(original_width)
+    image_y1 = image_y0 + float(original_height)
+
+    unique_labels = pd.unique(sampled_labels)
+    palette = sns.color_palette("tab20", n_colors=max(20, len(unique_labels)))
+    color_map = {
+        label: f"rgb({int(r * 255)},{int(g * 255)},{int(b * 255)})"
+        for label, (r, g, b) in zip(unique_labels, palette)
+    }
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Image(
+            z=display_img,
+            x0=image_x0,
+            y0=image_y0,
+            dx=(image_x1 - image_x0) / max(1, display_width),
+            dy=(image_y1 - image_y0) / max(1, display_height),
+            name="HE",
+            hoverinfo="skip",
+            opacity=1.0,
+        )
+    )
+
+    for label in unique_labels:
+        label_mask = sampled_labels == label
+        if not np.any(label_mask):
+            continue
+        fig.add_trace(
+            go.Scattergl(
+                x=x[label_mask],
+                y=y[label_mask],
+                mode="markers",
+                name=str(label),
+                marker={
+                    "size": point_size,
+                    "opacity": point_opacity,
+                    "color": color_map[label],
+                },
+                hoverinfo="skip",
+            )
+        )
+
+    fig.update_layout(
+        title=title or f"{color_col} (fast)",
+        template="plotly_white",
+        width=950,
+        height=780,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(itemsizing="constant"),
+    )
+    fig.update_xaxes(visible=False, range=[image_x0, image_x1])
+    fig.update_yaxes(visible=False, range=[image_y1, image_y0], scaleanchor="x", scaleratio=1)
+    fig.show()
+    return fig
+
+
 def plot_gene_cci_and_sankey(target_cell_type, sender_cell_type, Gene_to_analyze, each_display_num,
                              bargraph_df, edge_df, cluster_cells, coexp_cc_df,
                              lib_id, role="receiver", save=False,
