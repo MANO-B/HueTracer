@@ -459,6 +459,12 @@ class SpatialMicroenvironmentAnalyzer:
             - "neighbor": copy first available neighbor label (default, stable cluster counts)
             - "noise": keep as -1
             - "singleton": assign unique label per missing vertex (legacy behavior)
+
+        Note
+        ----
+        The number of neighbors is set by the `k_neighbors` parameter of SpatialMicroenvironmentAnalyzer.
+        
+        On GPU, missing vertices may occur; the "neighbor" policy is recommended.
         """
         seed = self.seed if seed is None else int(seed)
         set_global_seed(seed, deterministic_torch=self.deterministic_torch)
