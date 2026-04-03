@@ -2808,6 +2808,7 @@ def plot_gene_histograms_batch(
     log_scale: bool = True,
     show_nonzero_only: bool = False,
     figsize_scale: Tuple[float, float] = (4.0, 3.0),
+    show: bool = False,
 ) -> plt.Figure:
     """
     Plot per-gene expression histograms in a grid layout.
@@ -2881,7 +2882,8 @@ def plot_gene_histograms_batch(
     for j in range(i + 1, len(axes)):
         axes[j].axis("off")
 
-    plt.show()
+    if show:
+        plt.show()
     return fig
 
 
