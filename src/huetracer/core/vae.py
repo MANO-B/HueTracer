@@ -462,7 +462,7 @@ class SpatialMicroenvironmentAnalyzer:
 
         Note
         ----
-        The number of neighbors is set by the `k_neighbors` parameter of SpatialMicroenvironmentAnalyzer.
+        The number of neighbors is set by the `n_neighbors` parameter of this function (default: 15).
         
         On GPU, missing vertices may occur; the "neighbor" policy is recommended.
         """
