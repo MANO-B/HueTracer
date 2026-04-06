@@ -11,9 +11,9 @@ from typing import Optional, Dict, Tuple, Any
 import logging
 from .reproducibility import set_global_seed, get_seed_from_env
 
-# Reproducibility: set random seed once at import time (can be overridden by HUETRACER_SEED)
-SEED = get_seed_from_env(default=42)
-set_global_seed(SEED)
+# Reproducibility note:
+# Do not set global RNG state at import time.
+# Seeding is applied in run_scvi_label_transfer() to avoid side effects.
 # Log settings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
