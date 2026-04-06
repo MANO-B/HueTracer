@@ -16,7 +16,6 @@ ENV NVCC_PREPEND_FLAGS="--std=c++17"
 ENV CCCL_IGNORE_DEPRECATED_CPP_DIALECT=1
 ENV CUBLAS_WORKSPACE_CONFIG=:4096:8
 ENV LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
-ENV LD_PRELOAD=/lib/x86_64-linux-gnu/libnccl.so.2
 
 # 日本ミラー（任意）
 RUN sed -i 's@http://archive.ubuntu.com@http://ftp.riken.jp/Linux@g' /etc/apt/sources.list && \
@@ -56,7 +55,10 @@ RUN git clone https://github.com/digitalcytometry/cytotrace2 && \
     python3 -m pip install .
 
 # RAPIDS smoke test
-RUN python3 - <<'PY'
+# NOTE: Avoid global LD_PRELOAD; set only for this step when NCCL library exists.
+RUN NCCL_SO=/lib/x86_64-linux-gnu/libnccl.so.2; \
+  if [ -f "${NCCL_SO}" ]; then export LD_PRELOAD="${NCCL_SO}"; fi; \
+  python3 - <<'PY'
 import cudf
 import cuml
 import cugraph
