@@ -2403,9 +2403,9 @@ def plot_volcano_between_microenvironments(
         Raw expression AnnData used when `sp_adata` is not provided.
     sp_adata_microenvironment : Optional[ad.AnnData]
         Annotation AnnData used when `sp_adata` is not provided.
-        mask_coords : Optional[Tuple[int, int, int, int]], optional
-            Optional spatial mask applied only when building from `sp_adata_raw` and
-            `sp_adata_microenvironment`, by default None.
+    mask_coords : Optional[Tuple[int, int, int, int]], optional
+        Optional spatial mask applied only when building from `sp_adata_raw` and
+        `sp_adata_microenvironment`, by default None.
     target_cell_type : str
         Target cell type in `sp_adata.obs['predicted_cell_type']`.
     group1_environments : List[str]
