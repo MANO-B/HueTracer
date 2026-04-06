@@ -167,9 +167,6 @@ class SpatialMicroenvironmentAnalyzer:
         self.seed = get_seed_from_env(default=42) if seed is None else int(seed)
         self.deterministic_torch = bool(deterministic_torch)
 
-        # Keep global RNGs deterministic for this analysis instance.
-        set_global_seed(self.seed, deterministic_torch=self.deterministic_torch)
-
         self.n_cells, self.n_genes = self.expression_data.shape
         self.device = device if device is not None else pick_torch_device(prefer_gpu=prefer_gpu)
 
@@ -279,6 +276,8 @@ class SpatialMicroenvironmentAnalyzer:
           - On MPS, use num_workers=0 for stability.
           - On CUDA, pin_memory True can speed up.
         """
+        set_global_seed(self.seed, deterministic_torch=self.deterministic_torch)
+
         if not hasattr(self, "microenv_data"):
             raise RuntimeError("Run build_microenvironment_data() first.")
 
