@@ -14,10 +14,10 @@ import base64
 from io import BytesIO
 from typing import Optional, Dict, List, Union, Tuple
 from collections import defaultdict, Counter
-import matplotlib.pyplot as plt
 from matplotlib.colors import to_hex
 import warnings
 import re
+import importlib
 from itertools import cycle
 
 
@@ -1700,31 +1700,47 @@ class SpatialExpressionVisualizer:
             
     def _prepare_data(self):
         """Prepare and preprocess spatial data"""
-        # Apply spatial mask if provided
+        # Apply spatial mask if provided (obs index only to avoid full matrix copy)
+        candidate_cells = self.sp_adata_raw.obs_names
         if self.mask_coords:
             mask_large_x1, mask_large_x2, mask_large_y1, mask_large_y2 = self.mask_coords
-            cell_mask = ((self.sp_adata_raw.obs['array_row'] >= mask_large_x1) & 
-                         (self.sp_adata_raw.obs['array_row'] <= mask_large_x2) & 
-                         (self.sp_adata_raw.obs['array_col'] >= mask_large_y1) & 
-                         (self.sp_adata_raw.obs['array_col'] <= mask_large_y2))
-            sp_adata = self.sp_adata_raw.copy()[cell_mask]
-        else:
-            sp_adata = self.sp_adata_raw.copy()
-            
-        # Find common cells
-        common_cells = self.sp_adata_microenvironment.obs_names.intersection(sp_adata.obs_names)
-        sp_adata = self.sp_adata_raw[common_cells].copy()
-        
+            cell_mask = (
+                (self.sp_adata_raw.obs['array_row'] >= mask_large_x1)
+                & (self.sp_adata_raw.obs['array_row'] <= mask_large_x2)
+                & (self.sp_adata_raw.obs['array_col'] >= mask_large_y1)
+                & (self.sp_adata_raw.obs['array_col'] <= mask_large_y2)
+            )
+            candidate_cells = self.sp_adata_raw.obs_names[cell_mask.to_numpy()]
+
+        # Find common cells after optional masking
+        common_cells = self.sp_adata_microenvironment.obs_names.intersection(candidate_cells)
+        if len(common_cells) == 0:
+            raise ValueError("No common cells found between raw and microenvironment data.")
+
+        # Copy only the required subset once
+        sp_adata = self.sp_adata_raw[common_cells, :].copy()
+
         # Add annotations
-        sp_adata.obs["predicted_cell_type"] = self.sp_adata_microenvironment.obs.loc[common_cells, "predicted_cell_type"]
-        sp_adata.obs["predicted_microenvironment"] = self.sp_adata_microenvironment.obs.loc[common_cells, "predicted_microenvironment"]
-        
-        # Normalize
-        X = sp_adata.X.toarray() if hasattr(sp_adata.X, "toarray") else sp_adata.X  # shape: (n_cells, n_genes)
-        bin_counts = sp_adata.obs['bin_count'].values.astype(float)
-        bin_counts[bin_counts == 0] = 1e-9 
-        X = X / bin_counts.reshape(-1, 1)
-        sp_adata.layers['binned_normalized'] = X
+        sp_adata.obs["predicted_cell_type"] = self.sp_adata_microenvironment.obs.loc[
+            common_cells, "predicted_cell_type"
+        ].to_numpy()
+        sp_adata.obs["predicted_microenvironment"] = self.sp_adata_microenvironment.obs.loc[
+            common_cells, "predicted_microenvironment"
+        ].to_numpy()
+
+        # Normalize without densifying sparse matrices
+        X = sp_adata.X
+        if hasattr(X, "astype") and X.dtype != np.float32:
+            X = X.astype(np.float32)
+        bin_counts = sp_adata.obs['bin_count'].to_numpy(dtype=np.float32)
+        bin_counts[bin_counts == 0] = 1e-9
+        inv_bin_counts = 1.0 / bin_counts
+
+        if hasattr(X, "multiply"):
+            normalized = X.multiply(inv_bin_counts[:, None])
+            sp_adata.layers['binned_normalized'] = normalized.tocsr() if hasattr(normalized, "tocsr") else normalized
+        else:
+            sp_adata.layers['binned_normalized'] = X * inv_bin_counts[:, None]
         # sc.pp.normalize_total(sp_adata, target_sum=1e4)
         
         self.processed_data = sp_adata
@@ -2111,6 +2127,51 @@ def create_spatial_widget(sp_adata_raw,
     visualizer.create_interactive_widget()
     return None
 
+
+def _collect_aligned_cells_and_annotations(
+    sp_adata_raw: ad.AnnData,
+    sp_adata_microenvironment: ad.AnnData,
+    mask_coords: Optional[Tuple[int, int, int, int]] = None,
+) -> Tuple[pd.Index, pd.DataFrame]:
+    """Collect aligned cell IDs and required annotation columns.
+
+    Returns
+    -------
+    Tuple[pd.Index, pd.DataFrame]
+        Common cell IDs after optional masking and corresponding annotation dataframe
+        containing predicted_cell_type/predicted_microenvironment.
+    """
+    required_cols = {"predicted_cell_type", "predicted_microenvironment"}
+    missing_cols = required_cols.difference(sp_adata_microenvironment.obs.columns)
+    if missing_cols:
+        raise ValueError(
+            f"sp_adata_microenvironment is missing required obs columns: {sorted(missing_cols)}"
+        )
+
+    common_cells = sp_adata_microenvironment.obs_names.intersection(sp_adata_raw.obs_names)
+    if len(common_cells) == 0:
+        raise ValueError("No common cells between sp_adata_raw and sp_adata_microenvironment.")
+
+    if mask_coords is not None:
+        if "array_row" not in sp_adata_raw.obs.columns or "array_col" not in sp_adata_raw.obs.columns:
+            raise ValueError("sp_adata_raw.obs must contain 'array_row' and 'array_col' when mask_coords is used.")
+        x1, x2, y1, y2 = mask_coords
+        spatial_obs = sp_adata_raw.obs.loc[common_cells, ["array_row", "array_col"]]
+        spatial_mask = (
+            (spatial_obs["array_row"] >= x1)
+            & (spatial_obs["array_row"] <= x2)
+            & (spatial_obs["array_col"] >= y1)
+            & (spatial_obs["array_col"] <= y2)
+        )
+        common_cells = common_cells[spatial_mask.to_numpy()]
+        if len(common_cells) == 0:
+            raise ValueError("No common cells remain after applying mask_coords.")
+
+    ann_obs = sp_adata_microenvironment.obs.loc[
+        common_cells, ["predicted_cell_type", "predicted_microenvironment"]
+    ].copy()
+    return common_cells, ann_obs
+
 def plot_deg_by_microenvironment(
     sp_adata_raw: ad.AnnData,
     sp_adata_microenvironment: ad.AnnData,
@@ -2148,44 +2209,37 @@ def plot_deg_by_microenvironment(
     -------
     Optional[pd.DataFrame]
         DEG解析結果のトップ遺伝子をまとめたDataFrame。エラー時はNoneを返します。
+
+    Notes
+    -----
+    現在の実装では `sc.pp.log1p(sp_adata_filtered)` は `.X` に対して適用されますが、
+    DEG計算は `layer='binned_normalized'` を指定して実行しています。
+    そのため、DEGで実際に使われる値が「log変換後の値」ではない可能性があります。
+    （意図がlog変換後データでのDEGであれば、`.X` と `layer` の整合性を要確認）
     """
     plt.close('all')
     print(f"--- Starting DEG analysis for cell type: {target_cell_type} ---")
 
     # --- 1. データの前処理とフィルタリング ---
-    sp_adata = sp_adata_raw.copy()
-    if mask_coords:
-        print("Applying spatial mask...")
-        x1, x2, y1, y2 = mask_coords
-        cell_mask = ((sp_adata.obs['array_row'] >= x1) & (sp_adata.obs['array_row'] <= x2) &
-                     (sp_adata.obs['array_col'] >= y1) & (sp_adata.obs['array_col'] <= y2))
-        sp_adata = sp_adata[cell_mask, :].copy()
+    # メモリ削減のため、共通セル -> 対象細胞タイプ -> 有効グループの順で先に絞り込む。
+    try:
+        common_cells, ann_obs = _collect_aligned_cells_and_annotations(
+            sp_adata_raw=sp_adata_raw,
+            sp_adata_microenvironment=sp_adata_microenvironment,
+            mask_coords=mask_coords,
+        )
+    except ValueError as e:
+        print(f"❌ Error: {e}")
+        return None
 
-    # bin_countによる正規化
-    print("Normalizing by bin count...")
-    X = sp_adata.X.toarray() if hasattr(sp_adata.X, "toarray") else sp_adata.X
-    bin_counts = sp_adata.obs['bin_count'].values.astype(float)
-    bin_counts[bin_counts == 0] = 1e-9
-    sp_adata.layers['binned_normalized'] = X / bin_counts.reshape(-1, 1)
+    target_cells = ann_obs.index[ann_obs["predicted_cell_type"] == target_cell_type]
 
-    # アノテーション情報のマージ
-    common_cells = sp_adata_microenvironment.obs_names.intersection(sp_adata.obs_names)
-    sp_adata = sp_adata[common_cells, :].copy()
-    sp_adata.obs["predicted_cell_type"] = sp_adata_microenvironment.obs.loc[common_cells, "predicted_cell_type"]
-    sp_adata.obs["predicted_microenvironment"] = sp_adata_microenvironment.obs.loc[common_cells, "predicted_microenvironment"]
-
-    # 対象細胞タイプでフィルタリング
-    sp_adata_filtered = sp_adata[sp_adata.obs['predicted_cell_type'] == target_cell_type].copy()
-
-    if sp_adata_filtered.n_obs == 0:
+    if len(target_cells) == 0:
         print(f"❌ Error: No cells remain after filtering by '{target_cell_type}'.")
         return None
-    
-    print(f"Found {sp_adata_filtered.n_obs} cells for '{target_cell_type}'.")
-    sc.pp.log1p(sp_adata_filtered) # 対数変換
 
-    # 細胞数が少ない微小環境グループを除外
-    group_counts = sp_adata_filtered.obs['predicted_microenvironment'].value_counts()
+    # 細胞数が少ない微小環境グループを除外（AnnData生成前に実施してメモリ消費を抑える）
+    group_counts = ann_obs.loc[target_cells, 'predicted_microenvironment'].value_counts()
     valid_groups = group_counts[group_counts >= min_cells_per_group].index.tolist()
 
     if len(valid_groups) < 2:
@@ -2193,8 +2247,64 @@ def plot_deg_by_microenvironment(
         print(f"Valid groups found: {valid_groups}")
         return None
 
-    sp_adata_filtered = sp_adata_filtered[sp_adata_filtered.obs['predicted_microenvironment'].isin(valid_groups)].copy()
-    print(f"Analyzing valid microenvironments: {valid_groups}")
+    final_cells = ann_obs.loc[target_cells]
+    final_cells = final_cells[final_cells['predicted_microenvironment'].isin(valid_groups)].index
+
+    if len(final_cells) == 0:
+        print("❌ Error: No cells remain after valid microenvironment filtering.")
+        return None
+
+    # 必要なセルだけを最後にコピー
+    sp_adata_filtered = sp_adata_raw[final_cells, :].copy()
+    sp_adata_filtered.obs["predicted_cell_type"] = ann_obs.loc[final_cells, "predicted_cell_type"].values
+    sp_adata_filtered.obs["predicted_microenvironment"] = ann_obs.loc[final_cells, "predicted_microenvironment"].values
+
+    # bin_countによる正規化（dense化を避ける）
+    print("Normalizing by bin count...")
+    X = sp_adata_filtered.X
+    if hasattr(X, "astype") and X.dtype != np.float32:
+        X = X.astype(np.float32)
+    bin_counts = sp_adata_filtered.obs['bin_count'].to_numpy(dtype=np.float32)
+    bin_counts[bin_counts == 0] = 1e-9
+    inv_bin_counts = 1.0 / bin_counts
+
+    if hasattr(X, "multiply"):
+        # 疎行列のまま行方向に正規化
+        normalized = X.multiply(inv_bin_counts[:, None])
+        sp_adata_filtered.layers['binned_normalized'] = normalized.tocsr() if hasattr(normalized, "tocsr") else normalized
+    else:
+        # 密行列の場合のみ通常のブロードキャスト除算
+        sp_adata_filtered.layers['binned_normalized'] = X * inv_bin_counts[:, None]
+
+    print(f"Found {sp_adata_filtered.n_obs} cells for '{target_cell_type}'.")
+    # NOTE:
+    # sc.pp.log1p はデフォルトで .X に適用される。一方、この後の rank_genes_groups は
+    # layer='binned_normalized' を参照するため、ここでの log1p がDEGに反映されない
+    # 可能性がある。意図した解析仕様に合わせて .X/layer の使い分けを見直すこと。
+    sc.pp.log1p(sp_adata_filtered) # 対数変換（.X）
+
+    # rank_genes_groups 実行直前に group を再検証して、1細胞群を確実に除外する。
+    sp_adata_filtered.obs['predicted_microenvironment'] = (
+        sp_adata_filtered.obs['predicted_microenvironment'].astype(str)
+    )
+    final_group_counts = sp_adata_filtered.obs['predicted_microenvironment'].value_counts()
+    final_valid_groups = final_group_counts[final_group_counts >= min_cells_per_group].index.tolist()
+    if len(final_valid_groups) < 2:
+        print(
+            f"❌ Error: Less than 2 microenvironment groups with at least {min_cells_per_group} cells "
+            "after final validation."
+        )
+        print(f"Final valid groups found: {final_valid_groups}")
+        return None
+
+    sp_adata_filtered = sp_adata_filtered[
+        sp_adata_filtered.obs['predicted_microenvironment'].isin(final_valid_groups)
+    ].copy()
+    if pd.api.types.is_categorical_dtype(sp_adata_filtered.obs['predicted_microenvironment']):
+        sp_adata_filtered.obs['predicted_microenvironment'] = (
+            sp_adata_filtered.obs['predicted_microenvironment'].cat.remove_unused_categories()
+        )
+    print(f"Analyzing valid microenvironments: {final_valid_groups}")
 
     # --- 2. 発現差遺伝子（DEG）の計算 ---
     print("Running rank_genes_groups for differential expression analysis...")
@@ -2203,6 +2313,8 @@ def plot_deg_by_microenvironment(
         sp_adata_filtered,
         groupby='predicted_microenvironment',
         method='wilcoxon',
+        # NOTE: DEG calculation uses this layer. If log1p is expected to affect DEG,
+        # ensure the transformation is applied to this layer (or switch to .X usage).
         use_raw=False,
         layer='binned_normalized',
         key_added=key_added
@@ -2259,6 +2371,222 @@ def plot_deg_by_microenvironment(
     print("\n✅ Analysis complete.")
     
     return gene_rank_df
+
+
+def plot_volcano_between_microenvironments(
+    sp_adata: Optional[ad.AnnData] = None,
+    *,
+    sp_adata_raw: Optional[ad.AnnData] = None,
+    sp_adata_microenvironment: Optional[ad.AnnData] = None,
+    target_cell_type: str,
+    group1_environments: List[str],
+    group2_environments: List[str],
+    mask_coords: Optional[Tuple[int, int, int, int]] = None,
+    min_cells_per_gene: int = 100,
+    log2fc_threshold: float = 0.5,
+    pval_threshold: float = 0.05,
+    top_n_genes_to_label: int = 20,
+    normalize_and_log: bool = True,
+    save: bool = False,
+    save_path_for_today: Optional[str] = None,
+    sample_name: str = "sample",
+) -> pd.DataFrame:
+    """
+    Compare two microenvironment groups within a target cell type and draw a volcano plot.
+
+    Parameters
+    ----------
+    sp_adata : Optional[ad.AnnData]
+        AnnData containing expression matrix and annotations.
+        If omitted, `sp_adata_raw` and `sp_adata_microenvironment` are used to build it.
+    sp_adata_raw : Optional[ad.AnnData]
+        Raw expression AnnData used when `sp_adata` is not provided.
+    sp_adata_microenvironment : Optional[ad.AnnData]
+        Annotation AnnData used when `sp_adata` is not provided.
+    mask_coords : Optional[Tuple[int, int, int, int]], optional
+        Optional spatial mask applied only when building from `sp_adata_raw` and
+        `sp_adata_microenvironment`, by default None.
+    target_cell_type : str
+        Target cell type in `sp_adata.obs['predicted_cell_type']`.
+    group1_environments : List[str]
+        Microenvironment labels treated as the numerator group.
+    group2_environments : List[str]
+        Microenvironment labels treated as the reference group.
+    min_cells_per_gene : int, optional
+        Minimum number of cells expressing a gene to keep it, by default 100.
+    log2fc_threshold : float, optional
+        Absolute log2FC threshold for significance highlighting, by default 0.5.
+    pval_threshold : float, optional
+        Adjusted p-value threshold for significance highlighting, by default 0.05.
+    top_n_genes_to_label : int, optional
+        Maximum number of significant genes to label on the plot, by default 20.
+    normalize_and_log : bool, optional
+        Whether to run normalize_total and log1p before DEG, by default True.
+    save : bool, optional
+        Whether to save the volcano plot to file, by default False.
+    save_path_for_today : Optional[str], optional
+        Output directory when save=True, by default None.
+    sample_name : str, optional
+        Prefix used for output file names, by default "sample".
+
+    Returns
+    -------
+    pd.DataFrame
+        Volcano summary table with gene, log2fc, adjusted p-value, and significance columns.
+    """
+    if sp_adata is None:
+        if sp_adata_raw is None or sp_adata_microenvironment is None:
+            raise ValueError(
+                "Either provide `sp_adata`, or provide both `sp_adata_raw` and "
+                "`sp_adata_microenvironment`."
+            )
+        common_cells, ann_obs = _collect_aligned_cells_and_annotations(
+            sp_adata_raw=sp_adata_raw,
+            sp_adata_microenvironment=sp_adata_microenvironment,
+            mask_coords=mask_coords,
+        )
+        sp_adata = sp_adata_raw[common_cells, :].copy()
+        sp_adata.obs["predicted_cell_type"] = ann_obs["predicted_cell_type"].to_numpy()
+        sp_adata.obs["predicted_microenvironment"] = ann_obs["predicted_microenvironment"].to_numpy()
+    else:
+        required_cols = {"predicted_cell_type", "predicted_microenvironment"}
+        missing_cols = required_cols.difference(sp_adata.obs.columns)
+        if missing_cols:
+            raise ValueError(f"Missing required columns in sp_adata.obs: {sorted(missing_cols)}")
+
+    available_cell_types = sp_adata.obs["predicted_cell_type"].astype(str).unique()
+    if str(target_cell_type) not in available_cell_types:
+        raise ValueError(
+            f"target_cell_type '{target_cell_type}' is not found in sp_adata.obs['predicted_cell_type']"
+        )
+
+    adata_for_volcano = sp_adata[
+        sp_adata.obs["predicted_cell_type"].astype(str) == str(target_cell_type)
+    ].copy()
+    if adata_for_volcano.n_obs == 0:
+        raise ValueError(f"No cells remain after filtering by '{target_cell_type}'")
+
+    adata_for_volcano.obs["predicted_microenvironment"] = (
+        adata_for_volcano.obs["predicted_microenvironment"].astype(str)
+    )
+    adata_for_volcano.obs["volcano_group"] = np.nan
+    adata_for_volcano.obs.loc[
+        adata_for_volcano.obs["predicted_microenvironment"].isin([str(g) for g in group1_environments]),
+        "volcano_group",
+    ] = "group1"
+    adata_for_volcano.obs.loc[
+        adata_for_volcano.obs["predicted_microenvironment"].isin([str(g) for g in group2_environments]),
+        "volcano_group",
+    ] = "group2"
+
+    adata_for_volcano = adata_for_volcano[adata_for_volcano.obs["volcano_group"].notna()].copy()
+    if adata_for_volcano.n_obs == 0:
+        raise ValueError("No cells remain after assigning volcano groups")
+
+    group_counts = adata_for_volcano.obs["volcano_group"].value_counts()
+    if "group1" not in group_counts or "group2" not in group_counts:
+        raise ValueError("Both group1 and group2 must contain at least one cell")
+    if group_counts["group1"] < 2 or group_counts["group2"] < 2:
+        raise ValueError(
+            f"Each volcano group needs >=2 cells (group1={group_counts['group1']}, group2={group_counts['group2']})"
+        )
+
+    sc.pp.filter_genes(adata_for_volcano, min_cells=min_cells_per_gene)
+    if adata_for_volcano.n_vars == 0:
+        raise ValueError("No genes remain after filtering. Lower min_cells_per_gene.")
+
+    if normalize_and_log:
+        sc.pp.normalize_total(adata_for_volcano, target_sum=1e4)
+        sc.pp.log1p(adata_for_volcano)
+
+    key_added_dge = f"dge_group1_vs_group2_in_{target_cell_type}"
+    sc.tl.rank_genes_groups(
+        adata_for_volcano,
+        groupby="volcano_group",
+        reference="group2",
+        method="wilcoxon",
+        use_raw=False,
+        key_added=key_added_dge,
+    )
+
+    result = adata_for_volcano.uns[key_added_dge]
+    dge_results_df = pd.DataFrame(
+        {
+            "gene": result["names"]["group1"],
+            "log2fc": result["logfoldchanges"]["group1"],
+            "pvals_adj": result["pvals_adj"]["group1"],
+        }
+    )
+
+    dge_results_df["pvals_adj"] = dge_results_df["pvals_adj"].replace(0, np.finfo(float).eps)
+    dge_results_df["-log10_pvals_adj"] = -np.log10(dge_results_df["pvals_adj"])
+    dge_results_df["significant"] = (
+        (dge_results_df["pvals_adj"] < pval_threshold)
+        & (np.abs(dge_results_df["log2fc"]) > log2fc_threshold)
+    )
+    dge_results_df["abs_log2fc"] = np.abs(dge_results_df["log2fc"])
+
+    plt.figure(figsize=(10, 8))
+    sns.scatterplot(
+        data=dge_results_df,
+        x="log2fc",
+        y="-log10_pvals_adj",
+        hue="significant",
+        palette={True: "red", False: "grey"},
+        s=20,
+        alpha=0.7,
+        ax=plt.gca(),
+    )
+
+    neg_log10_pval_threshold = -np.log10(pval_threshold)
+    plt.axvline(log2fc_threshold, color="blue", linestyle="--", linewidth=1)
+    plt.axvline(-log2fc_threshold, color="blue", linestyle="--", linewidth=1)
+    plt.axhline(neg_log10_pval_threshold, color="green", linestyle="--", linewidth=1)
+    plt.title(
+        f"Volcano Plot for {target_cell_type}: "
+        f"Group ({', '.join(map(str, group1_environments))}) vs "
+        f"Group ({', '.join(map(str, group2_environments))})"
+    )
+    plt.xlabel("Log2 Fold Change")
+    plt.ylabel("-Log10 (Adjusted p-value)")
+    plt.grid(True, linestyle=":", alpha=0.6)
+
+    genes_to_label = dge_results_df[dge_results_df["significant"]].sort_values(
+        by="abs_log2fc", ascending=False
+    ).head(top_n_genes_to_label)
+    text_artists = [
+        plt.text(row["log2fc"], row["-log10_pvals_adj"], row["gene"], fontsize=9)
+        for _, row in genes_to_label.iterrows()
+    ]
+
+    if text_artists:
+        try:
+            at = importlib.import_module("adjustText")
+            at.adjust_text(text_artists, arrowprops=dict(arrowstyle="-", color="black", lw=0.5))
+        except Exception:
+            # Keep basic labels even when adjustText is unavailable.
+            pass
+
+    if save:
+        if not save_path_for_today:
+            raise ValueError("save_path_for_today must be provided when save=True")
+        filename = f"{sample_name}_{target_cell_type}_volcano_group1_vs_group2.pdf"
+        out_pdf = os.path.join(save_path_for_today, filename)
+        plt.savefig(out_pdf, format="pdf", dpi=300, bbox_inches="tight")
+        print(f"Saved volcano plot: {out_pdf}")
+
+    plt.show()
+
+    significant_up = dge_results_df[
+        (dge_results_df["log2fc"] > log2fc_threshold) & (dge_results_df["pvals_adj"] < pval_threshold)
+    ]
+    significant_down = dge_results_df[
+        (dge_results_df["log2fc"] < -log2fc_threshold) & (dge_results_df["pvals_adj"] < pval_threshold)
+    ]
+    print(f"Significantly upregulated genes: {len(significant_up)}")
+    print(f"Significantly downregulated genes: {len(significant_down)}")
+
+    return dge_results_df
 
 # --- 関数定義 ---
 def create_report_plots(
@@ -2472,6 +2800,93 @@ def interactive_gene_histogram(
         _update_plot(results_list.value)
 
     
+def plot_gene_histograms_batch(
+    adata: ad.AnnData,
+    target_genes: List[str],
+    n_cols: int = 4,
+    bins: int = 100,
+    log_scale: bool = True,
+    show_nonzero_only: bool = False,
+    figsize_scale: Tuple[float, float] = (4.0, 3.0),
+    show: bool = False,
+) -> plt.Figure:
+    """
+    Plot per-gene expression histograms in a grid layout.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object containing expression matrix in `.X`.
+    target_genes : List[str]
+        List of genes to visualize.
+    n_cols : int, optional
+        Number of subplot columns, by default 4.
+    bins : int, optional
+        Histogram bin count, by default 100.
+    log_scale : bool, optional
+        Whether to use log scale on y-axis, by default True.
+    show_nonzero_only : bool, optional
+        If True, plot only expression values > 0, by default False.
+    figsize_scale : Tuple[float, float], optional
+        Per-cell subplot size scaling `(width, height)`, by default (4.0, 3.0).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Generated figure object.
+    """
+    if n_cols <= 0:
+        raise ValueError("n_cols must be a positive integer")
+    if len(target_genes) == 0:
+        raise ValueError("target_genes must contain at least one gene")
+
+    n_genes = len(target_genes)
+    n_rows = int(np.ceil(n_genes / n_cols))
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(n_cols * figsize_scale[0], n_rows * figsize_scale[1]),
+        constrained_layout=True,
+    )
+    axes = np.array(axes).reshape(-1)
+
+    for i, gene in enumerate(target_genes):
+        ax = axes[i]
+
+        if gene not in adata.var_names:
+            ax.set_title(f"{gene} not found")
+            ax.axis("off")
+            continue
+
+        idx = adata.var_names.get_loc(gene)
+        expr = adata.X[:, idx].toarray().flatten() if hasattr(adata.X, "tocsc") else adata.X[:, idx].flatten()
+
+        if show_nonzero_only:
+            expr = expr[expr > 0]
+            if len(expr) == 0:
+                ax.set_title(f"{gene}\nNo nonzero values")
+                ax.axis("off")
+                continue
+
+        mean_val = np.mean(expr)
+        std_val = np.std(expr)
+
+        ax.hist(expr, bins=bins, log=log_scale, color="steelblue", edgecolor="black")
+        suffix = " (>0)" if show_nonzero_only else ""
+        ax.set_title(f"{gene}\nMean={mean_val:.2f}, SD={std_val:.2f}")
+        ax.set_xlabel(f"Expr Level{suffix}")
+        ax.set_ylabel("Cell Count (log)" if log_scale else "Cell Count")
+        ax.grid(True, which="both", linestyle="--", alpha=0.4)
+
+    for j in range(i + 1, len(axes)):
+        axes[j].axis("off")
+
+    if show:
+        plt.show()
+    return fig
+
+
 def interactive_cci_sankey(
     coexp_cc_df,
     edge_df,

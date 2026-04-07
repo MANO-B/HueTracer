@@ -14,6 +14,8 @@ ENV CSBDEEP_CACHE_DIR=/opt/models/csbdeep
 ENV KERAS_HOME=/opt/models/keras
 ENV NVCC_PREPEND_FLAGS="--std=c++17"
 ENV CCCL_IGNORE_DEPRECATED_CPP_DIALECT=1
+ENV CUBLAS_WORKSPACE_CONFIG=:4096:8
+ENV LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
 
 # 日本ミラー（任意）
 RUN sed -i 's@http://archive.ubuntu.com@http://ftp.riken.jp/Linux@g' /etc/apt/sources.list && \
@@ -33,7 +35,9 @@ RUN python3 -m pip install --no-cache-dir -U pip 'setuptools<70.0.0' wheel
 WORKDIR /app
 COPY pyproject.toml /app/
 COPY src/ /app/src/
-RUN python3 -m pip install --no-cache-dir -e /app[gpu]
+RUN python3 -m pip install --no-cache-dir \
+  --extra-index-url=https://pypi.nvidia.com \
+  -e /app[gpu]
 
 # ---- Pre-download StarDist pretrained model ----
 RUN mkdir -p /opt/models/csbdeep /opt/models/keras /opt/cache && \
@@ -50,13 +54,17 @@ RUN git clone https://github.com/digitalcytometry/cytotrace2 && \
     cd cytotrace2/cytotrace2_python && \
     python3 -m pip install .
 
-# RAPIDS (pip) from NVIDIA index
-RUN python3 -m pip install \
-    --extra-index-url=https://pypi.nvidia.com \
-    "cudf-cu12==26.2.*" \
-    "dask-cudf-cu12==26.2.*" \
-    "cuml-cu12==26.2.*" \
-    "cugraph-cu12==26.2.*"
+# RAPIDS smoke test
+# NOTE: Avoid global LD_PRELOAD; set only for this step when NCCL library exists.
+RUN NCCL_SO=/lib/x86_64-linux-gnu/libnccl.so.2; \
+  if [ -f "${NCCL_SO}" ]; then export LD_PRELOAD="${NCCL_SO}"; fi; \
+  python3 - <<'PY'
+import cudf
+import cuml
+import cugraph
+import dask_cudf
+print("RAPIDS import smoke test: OK")
+PY
 
 # 依存が崩れてないか最終チェック（CUDA マイクロバージョン差は非致命的）
 RUN set -e; \

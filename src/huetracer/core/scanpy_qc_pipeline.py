@@ -1,8 +1,9 @@
 import numpy as np
 import scanpy as sc
 import matplotlib.pyplot as plt
+from .reproducibility import set_global_seed, get_seed_from_env
 
-def scanpy_qc_pipeline(sp_adata, params, seed=0, out=None):
+def scanpy_qc_pipeline(sp_adata, params, seed=None, out=None):
     """
     Core logic for Scanpy QC / Filtering / Leiden pipeline.
     Args:
@@ -13,6 +14,9 @@ def scanpy_qc_pipeline(sp_adata, params, seed=0, out=None):
     Returns:
         sp_adata, sp_adata_sponly
     """
+    effective_seed = get_seed_from_env(default=42) if seed is None else int(seed)
+    set_global_seed(effective_seed)
+
     def _mt_hist(sp, xmax=10.0):
         vals = sp.obs["pct_counts_MT"].to_numpy()
         vals = vals[np.isfinite(vals)]
@@ -90,9 +94,9 @@ def scanpy_qc_pipeline(sp_adata, params, seed=0, out=None):
     print("Performing PCA...")
     sc.tl.pca(sp_adata_sponly, svd_solver="arpack",
         mask_var="highly_variable", n_comps=int(params["pca_n"]))
-    sc.pp.neighbors(sp_adata_sponly, random_state=seed)
+    sc.pp.neighbors(sp_adata_sponly, random_state=effective_seed)
     print("Performing UMAP...")
-    sc.tl.umap(sp_adata_sponly, random_state=seed)
+    sc.tl.umap(sp_adata_sponly, random_state=effective_seed)
     print("Performing Leiden...")
     sc.tl.leiden(
         sp_adata_sponly,
@@ -100,7 +104,7 @@ def scanpy_qc_pipeline(sp_adata, params, seed=0, out=None):
         flavor="igraph",
         n_iterations=int(params["leiden_iters"]),
         key_added="leiden",
-        random_state=seed
+        random_state=effective_seed
     )
     print("✅ Embeddings + Leiden done.")
     print("sp_adata_sponly.n_obs:", sp_adata_sponly.n_obs)
