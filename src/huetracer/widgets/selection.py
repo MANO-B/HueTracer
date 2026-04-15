@@ -5,6 +5,8 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output
 from PIL import Image as PILImage
 import plotly.graph_objects as go
+from scipy.ndimage import distance_transform_edt
+from scipy.spatial import cKDTree
 
 
 def _build_figure_widget_or_raise():
@@ -92,14 +94,15 @@ def _make_color_map(labels):
 class _BasePlotlySelector:
     """Shared high-performance plotly selector behavior."""
 
-    def __init__(self, sp_adata, merged_df, lib_id, downsample_factor=0.25):
+    def __init__(self, sp_adata, merged_df, lib_id, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
         self.sp_adata_ref = sp_adata
         self.merged = merged_df.copy()
         self.merged_original = merged_df
         self.lib_id = lib_id
         self.downsample_factor = downsample_factor
+        self.img_key = img_key
 
-        raw_img = sp_adata.uns["spatial"][lib_id]["images"]["0.5_mpp_150_buffer"]
+        raw_img = sp_adata.uns["spatial"][lib_id]["images"][img_key]
         self.h, self.w = raw_img.shape[:2]
         self.bg_img = _limit_image_pixels(_downsample_image(raw_img, downsample_factor))
         self.bg_pil = _to_pil_image(self.bg_img)
@@ -107,8 +110,8 @@ class _BasePlotlySelector:
         del raw_img
 
         self.index_values = self.merged.index.to_numpy()
-        self.x = self.merged["x"].to_numpy()
-        self.y = self.merged["y"].to_numpy()
+        self.x = self.merged["x"].to_numpy(dtype=np.float64)
+        self.y = self.merged["y"].to_numpy(dtype=np.float64)
         self.index_to_pos = {idx: i for i, idx in enumerate(self.index_values)}
 
         self.zoom_level = 1.0
@@ -338,11 +341,11 @@ class _BasePlotlySelector:
 class LassoCellSelectorMicroenvironment(_BasePlotlySelector):
     """High-performance microenvironment relabeling widget using Plotly ScatterGL."""
 
-    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25):
+    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
         self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
         self.current_clusters = self.original_clusters.copy()
 
-        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor)
+        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor, img_key=img_key)
 
         self.labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
         self.group_order = [str(v) for v in self.merged["predicted_microenvironment"].dropna().unique()]
@@ -505,11 +508,11 @@ class LassoCellSelectorMicroenvironment(_BasePlotlySelector):
 class LassoCellSelectorCellType(_BasePlotlySelector):
     """High-performance cell-type relabeling widget using Plotly ScatterGL."""
 
-    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25):
+    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
         self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
         self.current_clusters = self.original_clusters.copy()
 
-        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor)
+        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor, img_key=img_key)
 
         self.microenv_labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
         self.celltype_labels = self.merged["predicted_cell_type"].astype(str).to_numpy()
@@ -667,7 +670,501 @@ class LassoCellSelectorCellType(_BasePlotlySelector):
         return self
 
 
-def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25):
+class DistanceMicroenvironmentSelector(_BasePlotlySelector):
+    """Distance-based microenvironment relabeling widget.
+
+    Supports nearest, centroid, kNN mean, and distance-transform style distances.
+    """
+
+    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
+        self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
+        self.current_clusters = self.original_clusters.copy()
+
+        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor, img_key=img_key)
+
+        # Distance mode does not use lasso/box selection; keep navigation-focused controls.
+        self.selection_mode.options = [("Pan", "pan")]
+        self.selection_mode.value = "pan"
+        self.selection_mode.disabled = True
+        self.selection_mode.layout = widgets.Layout(display="none")
+        self.fig.update_layout(
+            dragmode="pan",
+            modebar_remove=["lasso2d", "select2d"],
+            modebar_add=["pan2d"],
+        )
+
+        self.cell_type_labels = self.merged["predicted_cell_type"].astype(str).to_numpy()
+        self.microenv_labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
+        self.cell_type_order = [str(v) for v in self.merged["predicted_cell_type"].dropna().unique()]
+        self.microenv_order = [str(v) for v in self.merged["predicted_microenvironment"].dropna().unique()]
+
+        self.method_selector = widgets.Dropdown(
+            options=[
+                ("Nearest distance", "nearest"),
+                ("Centroid distance", "centroid"),
+                ("kNN mean distance", "knn_mean"),
+                ("Distance transform", "distance_transform"),
+            ],
+            value="nearest",
+            description="Method:",
+            layout=widgets.Layout(width="340px"),
+        )
+        self.reference_selector = widgets.SelectMultiple(
+            options=self.cell_type_order,
+            value=tuple(),
+            description="Reference CT:",
+            layout=widgets.Layout(height="170px"),
+        )
+        self.target_microenv_selector = widgets.SelectMultiple(
+            options=self.microenv_order,
+            value=tuple(),
+            description="Target ME:",
+            layout=widgets.Layout(height="170px"),
+        )
+        self.distance_unit = widgets.Dropdown(
+            options=[("um", "um"), ("pixel", "px")],
+            value="um",
+            description="Dist Unit:",
+            layout=widgets.Layout(width="200px"),
+        )
+        self.k_value = widgets.BoundedIntText(value=5, min=1, max=5000, description="k:", layout=widgets.Layout(width="180px"))
+        self.threshold_count = widgets.Dropdown(options=[1, 2, 3], value=3, description="#Thresholds:", layout=widgets.Layout(width="220px"))
+        self.threshold_1 = widgets.FloatText(value=50.0, description="Thr 1:", layout=widgets.Layout(width="220px"))
+        self.threshold_2 = widgets.FloatText(value=100.0, description="Thr 2:", layout=widgets.Layout(width="220px"))
+        self.threshold_3 = widgets.FloatText(value=150.0, description="Thr 3:", layout=widgets.Layout(width="220px"))
+        self.relabel_target = widgets.Dropdown(
+            options=[("all", "all"), ("th1", "th1")],
+            value="all",
+            description="Relabel Target:",
+            layout=widgets.Layout(width="260px"),
+        )
+        self.new_label_input = widgets.Text(value="selected_microenv", description="New Label:", layout=widgets.Layout(width="320px"))
+        self.label_prefix = widgets.Text(value="microenv_dist", description="Label Prefix:", layout=widgets.Layout(width="320px"))
+
+        self.compute_btn = widgets.Button(description="Compute Distances", button_style="info")
+        self.apply_btn = widgets.Button(description="Apply Labels", button_style="success")
+        self.clear_btn = widgets.Button(description="Clear Preview", button_style="warning")
+        self.update_btn = widgets.Button(description="Update AnnData", button_style="primary")
+        self.export_btn = widgets.Button(description="Export", button_style="info")
+
+        self.distance_summary = widgets.HTML(value="<b>Distance summary:</b> not computed")
+        self.assignment_summary = widgets.HTML(value="<b>Assignment:</b> not computed")
+
+        self._distance_cache = {}
+        self._distance_values = None
+        self._threshold_masks = {}
+
+        # Keep reference CT color distinct from threshold palette (up to 3 colors).
+        self.reference_color = "rgb(106,61,154)"
+        self.target_color = "rgb(140,140,140)"
+        self.threshold_colors = ["rgb(230,85,13)", "rgb(49,130,189)", "rgb(49,163,84)"]
+
+        # Distance calculations run in image pixel space (x,y). Convert to/from physical um for UI.
+        self.pixel_size_um = self._infer_pixel_size_um(default=0.5)
+
+        self.selection_info.value = "<b>Selected:</b> N/A (distance mode)"
+
+        self.threshold_count.observe(self._on_threshold_count_change, names="value")
+        self.distance_unit.observe(self._on_distance_unit_change, names="value")
+        self.reference_selector.observe(self._on_filter_change, names="value")
+        self.target_microenv_selector.observe(self._on_filter_change, names="value")
+        self.compute_btn.on_click(self._compute_and_preview)
+        self.apply_btn.on_click(self._apply_selection)
+        self.clear_btn.on_click(self._clear_selection)
+        self.update_btn.on_click(self._update_anndata)
+        self.export_btn.on_click(self._export_data)
+
+        self._on_threshold_count_change(None)
+        self._refresh_plot()
+        self._set_status_header()
+
+    def _set_status_header(self):
+        self.status.value = (
+            f"<b>Status:</b> Ready | total cells={len(self.merged)}, cell types={len(self.cell_type_order)}, "
+            f"microenv={len(self.microenv_order)}, image={self.w}x{self.h}, downsample={self.downsample_factor}"
+        )
+
+    def _on_plot_selection(self, trace, points, selector):
+        # Intentionally disabled in distance mode.
+        return
+
+    def _infer_pixel_size_um(self, default=0.5):
+        # Compute from scalefactors: microns_per_pixel (fullres) / tissue_{img_key}_scalef
+        # merged["x"/"y"] are in img_key image space (coords_raw * tissue_{img_key}_scalef),
+        # so 1 display-image pixel = microns_per_pixel_fullres / scalef um.
+        scalefactors = self.sp_adata_ref.uns.get("spatial", {}).get(self.lib_id, {}).get("scalefactors", {})
+        mpp_fullres = scalefactors.get("microns_per_pixel")
+        if mpp_fullres is not None:
+            scalef_key = f"tissue_{self.img_key}_scalef"
+            scalef = scalefactors.get(scalef_key)
+            if scalef is not None and float(scalef) > 0:
+                return float(mpp_fullres) / float(scalef)
+        return float(default)
+
+    def _distance_to_display_units(self, arr):
+        if self.distance_unit.value == "um":
+            return np.asarray(arr, dtype=np.float64) * float(self.pixel_size_um)
+        return np.asarray(arr, dtype=np.float64)
+
+    def _display_to_distance_units(self, value):
+        if self.distance_unit.value == "um":
+            return float(value) / float(self.pixel_size_um)
+        return float(value)
+
+    def _distance_unit_label(self):
+        return "um" if self.distance_unit.value == "um" else "px"
+
+    def _on_threshold_count_change(self, _):
+        n = int(self.threshold_count.value)
+        self.threshold_2.disabled = n < 2
+        self.threshold_3.disabled = n < 3
+        options = [("all", "all")] + [(f"th{i}", f"th{i}") for i in range(1, n + 1)]
+        current = self.relabel_target.value
+        self.relabel_target.options = options
+        if current not in {v for _, v in options}:
+            self.relabel_target.value = "all"
+        self._update_threshold_labels()
+        self._reset_preview_state()
+        self._refresh_plot()
+
+    def _on_distance_unit_change(self, _):
+        self._update_threshold_labels()
+        self._reset_preview_state()
+        self._refresh_plot()
+
+    def _update_threshold_labels(self):
+        unit = self._distance_unit_label()
+        self.threshold_1.description = f"Thr 1 ({unit}):"
+        self.threshold_2.description = f"Thr 2 ({unit}):"
+        self.threshold_3.description = f"Thr 3 ({unit}):"
+
+    def _on_filter_change(self, _):
+        self._reset_preview_state()
+        self._refresh_plot()
+
+    def _reset_preview_state(self):
+        self._distance_values = None
+        self._threshold_masks = {}
+        self.distance_summary.value = "<b>Distance summary:</b> not computed"
+        self.assignment_summary.value = "<b>Assignment:</b> not computed"
+
+    def _get_thresholds(self):
+        n = int(self.threshold_count.value)
+        raw = [self.threshold_1.value, self.threshold_2.value, self.threshold_3.value][:n]
+        thresholds = [float(v) for v in raw]
+        if any(v < 0 for v in thresholds):
+            raise ValueError("Thresholds must be non-negative")
+        if any(thresholds[i] >= thresholds[i + 1] for i in range(len(thresholds) - 1)):
+            raise ValueError("Thresholds must be strictly increasing")
+        return thresholds
+
+    def _coords_for_distance_transform(self):
+        if ("array_col" in self.merged.columns) and ("array_row" in self.merged.columns):
+            x = self.merged["array_col"].to_numpy(dtype=np.float64)
+            y = self.merged["array_row"].to_numpy(dtype=np.float64)
+            return x, y
+        return self.x.astype(np.float64), self.y.astype(np.float64)
+
+    def _distance_key(self, method, refs, k):
+        return (method, tuple(sorted(refs)), int(k))
+
+    def _compute_distances(self, method, refs, k):
+        key = self._distance_key(method, refs, k)
+        if key in self._distance_cache:
+            return self._distance_cache[key]
+
+        ref_mask = np.isin(self.cell_type_labels, np.array(refs, dtype=object))
+        ref_idx = np.where(ref_mask)[0]
+        if len(ref_idx) == 0:
+            raise ValueError("No cells found for selected reference cell types")
+
+        pts = np.column_stack([self.x, self.y])
+        ref_pts = pts[ref_idx]
+
+        if method == "nearest":
+            tree = cKDTree(ref_pts)
+            dists, _ = tree.query(pts, k=1)
+            out = dists.astype(np.float64)
+        elif method == "centroid":
+            centroid = np.mean(ref_pts, axis=0)
+            out = np.linalg.norm(pts - centroid[None, :], axis=1).astype(np.float64)
+        elif method == "knn_mean":
+            kk = max(1, min(int(k), len(ref_idx)))
+            tree = cKDTree(ref_pts)
+            dists, _ = tree.query(pts, k=kk)
+            if kk == 1:
+                out = dists.astype(np.float64)
+            else:
+                out = np.mean(dists, axis=1).astype(np.float64)
+        elif method == "distance_transform":
+            using_array_grid = ("array_col" in self.merged.columns) and ("array_row" in self.merged.columns)
+            gx, gy = self._coords_for_distance_transform()
+            gx = np.round(gx - np.min(gx)).astype(np.int64)
+            gy = np.round(gy - np.min(gy)).astype(np.int64)
+            h = int(np.max(gy)) + 1
+            w = int(np.max(gx)) + 1
+            h = max(h, 2)
+            w = max(w, 2)
+
+            # Guard: fall back to KD-tree when the grid would consume excessive memory
+            # (threshold: 25M cells ≈ 25MB for bool). This is only reached when
+            # array_col/array_row is unavailable and x/y pixel coords are used instead.
+            _MAX_GRID_CELLS = 25_000_000
+            if h * w > _MAX_GRID_CELLS:
+                tree = cKDTree(ref_pts)
+                dists_raw, _ = tree.query(pts, k=1)
+                out = dists_raw.astype(np.float64)
+            else:
+                mask = np.zeros((h, w), dtype=bool)
+                mask[gy[ref_idx], gx[ref_idx]] = True
+                dt = distance_transform_edt(~mask)
+                out = dt[gy, gx].astype(np.float64)
+                # array_col/array_row are in grid units (1 unit = bin_size_um).
+                # Scale to pixel units so _distance_to_display_units gives consistent μm values.
+                if using_array_grid:
+                    scalefactors = self.sp_adata_ref.uns.get("spatial", {}).get(self.lib_id, {}).get("scalefactors", {})
+                    bin_size_um = float(scalefactors.get("bin_size_um", 2.0))
+                    out = out * (bin_size_um / self.pixel_size_um)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        self._distance_cache[key] = out
+        return out
+
+    def _make_threshold_masks(self, dists, thresholds, target_mask):
+        masks = {}
+        assigned = np.zeros(len(dists), dtype=bool)
+        for i, thr in enumerate(thresholds, start=1):
+            m = target_mask & (~assigned) & (dists <= thr)
+            assigned[m] = True
+            masks[f"th{i}"] = m
+        unassigned = target_mask & (~assigned)
+        return masks, unassigned
+
+    def _format_distance_stats(self, d):
+        n = len(d)
+        if n == 0:
+            return "count=0"
+        p10 = float(np.percentile(d, 10))
+        p50 = float(np.percentile(d, 50))
+        p90 = float(np.percentile(d, 90))
+        unit = self._distance_unit_label()
+        return (
+            f"count={n}, min={float(np.min(d)):.3f} {unit}, p10={p10:.3f} {unit}, "
+            f"median={p50:.3f} {unit}, p90={p90:.3f} {unit}, max={float(np.max(d)):.3f} {unit}"
+        )
+
+    def _format_distance_summary(self, dists, target_mask=None, target_labels=None):
+        if target_mask is None:
+            target_mask = np.ones(len(dists), dtype=bool)
+
+        d_target = self._distance_to_display_units(np.asarray(dists)[target_mask])
+        target_stats = self._format_distance_stats(d_target)
+        if target_labels:
+            target_name = "+".join(target_labels)
+        else:
+            target_name = "selected_target"
+
+        return f"<b>Distance summary (target ME: {target_name}):</b> {target_stats}"
+
+    def _format_assignment_summary(self, dists, threshold_masks, unassigned_mask, prefix):
+        if not threshold_masks:
+            return "<b>Assignment:</b> none"
+
+        unit = self._distance_unit_label()
+        d = np.asarray(dists)
+        parts = []
+        # 色リスト（最大3つまで）
+        colors = self.threshold_colors
+        out_of_range_color = "rgb(180,180,180)"  # グレー
+
+        for i in range(1, int(self.threshold_count.value) + 1):
+            key = f"th{i}"
+            mask = threshold_masks.get(key)
+            color = colors[i-1] if i-1 < len(colors) else "rgb(120,120,120)"
+            color_box = f'<span style="display:inline-block;width:1em;height:1em;background:{color};border:1px solid #888;margin-right:0.3em;"></span>'
+            if mask is None:
+                continue
+            cnt = int(np.sum(mask))
+            if cnt > 0:
+                med = float(np.median(self._distance_to_display_units(d[mask])))
+                parts.append(f"{color_box}{prefix}_{i}: {cnt} (median={med:.3f} {unit})")
+            else:
+                parts.append(f"{color_box}{prefix}_{i}: 0 (median=n/a)")
+
+        out_cnt = int(np.sum(unassigned_mask))
+        color_box = f'<span style="display:inline-block;width:1em;height:1em;background:{out_of_range_color};border:1px solid #888;margin-right:0.3em;"></span>'
+        if out_cnt > 0:
+            out_med = float(np.median(self._distance_to_display_units(d[unassigned_mask])))
+            parts.append(f"{color_box}out_of_range: {out_cnt} (median={out_med:.3f} {unit})")
+        else:
+            parts.append(f"{color_box}out_of_range: 0 (median=n/a)")
+
+        return "<b>Assignment:</b> " + " | ".join(parts)
+
+    def _compute_and_preview(self, _=None):
+        try:
+            refs = list(self.reference_selector.value)
+            if len(refs) == 0:
+                raise ValueError("Select at least one reference cell type")
+
+            target_me = list(self.target_microenv_selector.value)
+            if len(target_me) == 0:
+                raise ValueError("Select at least one target microenvironment")
+
+            method = self.method_selector.value
+            k = int(self.k_value.value)
+            thresholds_display = self._get_thresholds()
+            thresholds = [self._display_to_distance_units(v) for v in thresholds_display]
+            prefix = self.label_prefix.value.strip()
+            if not prefix:
+                raise ValueError("Enter a non-empty label prefix")
+
+            dists = self._compute_distances(method, refs, k)
+            target_mask = np.isin(self.microenv_labels, np.array(target_me, dtype=object))
+            threshold_masks, unassigned = self._make_threshold_masks(dists, thresholds, target_mask)
+
+            self._distance_values = dists
+            self._threshold_masks = threshold_masks
+            self.distance_summary.value = self._format_distance_summary(
+                dists,
+                target_mask=target_mask,
+                target_labels=target_me,
+            )
+            self.assignment_summary.value = self._format_assignment_summary(
+                dists=dists,
+                threshold_masks=threshold_masks,
+                unassigned_mask=unassigned,
+                prefix=prefix,
+            )
+
+            self._refresh_plot()
+            self.status.value = "<b>Status:</b> Preview updated"
+        except Exception as exc:
+            self.status.value = f"<b>Status:</b> Compute failed: {exc}"
+
+    def _refresh_plot(self):
+        refs = list(self.reference_selector.value)
+        target_me = list(self.target_microenv_selector.value)
+
+        ref_mask = np.isin(self.cell_type_labels, np.array(refs, dtype=object)) if refs else np.zeros(len(self.merged), dtype=bool)
+        target_mask = np.isin(self.microenv_labels, np.array(target_me, dtype=object)) if target_me else np.zeros(len(self.merged), dtype=bool)
+        visible_mask = ref_mask | target_mask
+
+        if not np.any(visible_mask):
+            self._refresh_main_trace(np.array([], dtype=np.int64), np.array([], dtype=object))
+            self.status.value = "<b>Status:</b> Select reference CT and/or target microenvironment"
+            return
+
+        color_by = np.full(len(self.merged), self.reference_color, dtype=object)
+        color_by[target_mask] = self.target_color
+
+        if self._distance_values is not None and self._threshold_masks:
+            for i in range(1, int(self.threshold_count.value) + 1):
+                key = f"th{i}"
+                mask = self._threshold_masks.get(key)
+                if mask is not None:
+                    color_by[mask] = self.threshold_colors[i - 1]
+
+        pos = np.where(visible_mask)[0]
+        self._refresh_main_trace(pos, color_by)
+        self.status.value = f"<b>Status:</b> Rendering {len(self.visible_positions)} / {int(np.sum(visible_mask))} visible points"
+
+    def _clear_selection(self, _=None):
+        # Return to initial view: no reference CT / no target microenvironment selected.
+        with self.reference_selector.hold_trait_notifications(), self.target_microenv_selector.hold_trait_notifications():
+            self.reference_selector.value = tuple()
+            self.target_microenv_selector.value = tuple()
+        self._reset_preview_state()
+        self._refresh_plot()
+        self.status.value = "<b>Status:</b> Cleared to initial view (no dots)"
+
+    def _apply_selection(self, _=None):
+        if (self._distance_values is None) or (not self._threshold_masks):
+            self.status.value = "<b>Status:</b> Run 'Compute Distances' first"
+            return
+
+        new_label = self.new_label_input.value.strip()
+        if not new_label:
+            self.status.value = "<b>Status:</b> Enter a valid new label"
+            return
+
+        target_key = self.relabel_target.value
+        if target_key == "all":
+            relabel_mask = np.zeros(len(self.merged), dtype=bool)
+            for mask in self._threshold_masks.values():
+                relabel_mask |= mask
+        else:
+            relabel_mask = self._threshold_masks.get(target_key)
+            if relabel_mask is None:
+                self.status.value = f"<b>Status:</b> {target_key} is not available for current threshold setting"
+                return
+
+        target_idx = self.merged.index[relabel_mask]
+        if len(target_idx) == 0:
+            self.status.value = "<b>Status:</b> No cells matched selected relabel target"
+            return
+
+        cat_col = "predicted_microenvironment"
+        if pd.api.types.is_categorical_dtype(self.merged[cat_col]) and new_label not in self.merged[cat_col].cat.categories:
+            self.merged[cat_col] = self.merged[cat_col].cat.add_categories([new_label])
+
+        self.merged.loc[target_idx, cat_col] = new_label
+        self.current_clusters = self.merged[cat_col].copy()
+        self.microenv_labels = self.merged[cat_col].astype(str).to_numpy()
+        self.microenv_order = [str(v) for v in self.merged[cat_col].dropna().unique()]
+        with self.target_microenv_selector.hold_trait_notifications():
+            self.target_microenv_selector.value = ()
+            self.target_microenv_selector.options = self.microenv_order
+
+        changed = len(target_idx)
+        self._reset_preview_state()
+        self._refresh_plot()
+        self.status.value = f"<b>Status:</b> Applied '{new_label}' to {changed} cells ({target_key})"
+
+    def _update_anndata(self, _=None):
+        self.sp_adata_ref.obs["predicted_microenvironment"] = self.merged["predicted_microenvironment"].values
+        self.merged_original["predicted_microenvironment"] = self.merged["predicted_microenvironment"].values
+        self.status.value = "<b>Status:</b> AnnData updated"
+
+    def _export_data(self, _=None):
+        import __main__ as main
+
+        main.updated_merged_distance_export = self.merged.copy()
+        main.updated_clusters_distance_export = self.current_clusters.copy()
+        self.status.value = "<b>Status:</b> Exported to updated_merged_distance_export / updated_clusters_distance_export"
+
+    def run(self):
+        controls = widgets.VBox(
+            [
+                widgets.HTML("<h3>Distance microenvironment selector</h3>"),
+                self.method_selector,
+                self.reference_selector,
+                self.target_microenv_selector,
+                widgets.HBox([self.k_value, self.threshold_count, self.distance_unit]),
+                widgets.HBox([self.threshold_1, self.threshold_2, self.threshold_3]),
+                self.label_prefix,
+                self.relabel_target,
+                self.new_label_input,
+                self.zoom_slider,
+                self.point_size_slider,
+                self.opacity_slider,
+                widgets.HBox([self.compute_btn, self.apply_btn, self.clear_btn]),
+                widgets.HBox([self.update_btn, self.export_btn]),
+                self.distance_summary,
+                self.assignment_summary,
+                self.status,
+            ],
+            layout=widgets.Layout(width="380px", min_width="380px"),
+        )
+
+        self._mount_figure()
+        ui = widgets.HBox([controls, self.output], layout=widgets.Layout(width="100%", align_items="flex-start"))
+        display(ui)
+        return self
+
+
+def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
     """Launch high-performance microenvironment selector."""
     selector = LassoCellSelectorMicroenvironment(
         sp_adata=sp_adata,
@@ -675,11 +1172,12 @@ def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsam
         lib_id=lib_id,
         clusters=clusters,
         downsample_factor=downsample_factor,
+        img_key=img_key,
     )
     return selector.run()
 
 
-def lasso_selection_cell_type(sp_adata, merged, lib_id, clusters, downsample_factor=0.25):
+def lasso_selection_cell_type(sp_adata, merged, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
     """Launch high-performance cell type selector."""
     selector = LassoCellSelectorCellType(
         sp_adata=sp_adata,
@@ -687,5 +1185,19 @@ def lasso_selection_cell_type(sp_adata, merged, lib_id, clusters, downsample_fac
         lib_id=lib_id,
         clusters=clusters,
         downsample_factor=downsample_factor,
+        img_key=img_key,
+    )
+    return selector.run()
+
+
+def distance_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
+    """Launch distance-based microenvironment selector."""
+    selector = DistanceMicroenvironmentSelector(
+        sp_adata=sp_adata,
+        merged_df=merged,
+        lib_id=lib_id,
+        clusters=clusters,
+        downsample_factor=downsample_factor,
+        img_key=img_key,
     )
     return selector.run()

@@ -3,6 +3,7 @@
 from .selection import (
     LassoCellSelectorMicroenvironment, lasso_selection_microenvironment,
     LassoCellSelectorCellType, lasso_selection_cell_type,
+    DistanceMicroenvironmentSelector, distance_selection_microenvironment,
 )
 
 from .widget import SpatialGeneExpressionViewer, VolcanoPlotter
@@ -30,6 +31,8 @@ __all__ = [
     'lasso_selection_microenvironment',
     'LassoCellSelectorCellType',
     'lasso_selection_cell_type',
+    'DistanceMicroenvironmentSelector',
+    'distance_selection_microenvironment',
     'SpatialGeneExpressionViewer',
     'VolcanoPlotter',
     'PathSetupWidget',
