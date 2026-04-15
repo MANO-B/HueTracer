@@ -897,6 +897,7 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
             else:
                 out = np.mean(dists, axis=1).astype(np.float64)
         elif method == "distance_transform":
+            using_array_grid = ("array_col" in self.merged.columns) and ("array_row" in self.merged.columns)
             gx, gy = self._coords_for_distance_transform()
             gx = np.round(gx - np.min(gx)).astype(np.int64)
             gy = np.round(gy - np.min(gy)).astype(np.int64)
@@ -905,10 +906,25 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
             h = max(h, 2)
             w = max(w, 2)
 
-            mask = np.zeros((h, w), dtype=bool)
-            mask[gy[ref_idx], gx[ref_idx]] = True
-            dt = distance_transform_edt(~mask)
-            out = dt[gy, gx].astype(np.float64)
+            # Guard: fall back to KD-tree when the grid would consume excessive memory
+            # (threshold: 25M cells ≈ 25MB for bool). This is only reached when
+            # array_col/array_row is unavailable and x/y pixel coords are used instead.
+            _MAX_GRID_CELLS = 25_000_000
+            if h * w > _MAX_GRID_CELLS:
+                tree = cKDTree(ref_pts)
+                dists_raw, _ = tree.query(pts, k=1)
+                out = dists_raw.astype(np.float64)
+            else:
+                mask = np.zeros((h, w), dtype=bool)
+                mask[gy[ref_idx], gx[ref_idx]] = True
+                dt = distance_transform_edt(~mask)
+                out = dt[gy, gx].astype(np.float64)
+                # array_col/array_row are in grid units (1 unit = bin_size_um).
+                # Scale to pixel units so _distance_to_display_units gives consistent μm values.
+                if using_array_grid:
+                    scalefactors = self.sp_adata_ref.uns.get("spatial", {}).get(self.lib_id, {}).get("scalefactors", {})
+                    bin_size_um = float(scalefactors.get("bin_size_um", 2.0))
+                    out = out * (bin_size_um / self.pixel_size_um)
         else:
             raise ValueError(f"Unknown method: {method}")
 
@@ -1097,7 +1113,9 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
         self.current_clusters = self.merged[cat_col].copy()
         self.microenv_labels = self.merged[cat_col].astype(str).to_numpy()
         self.microenv_order = [str(v) for v in self.merged[cat_col].dropna().unique()]
-        self.target_microenv_selector.options = self.microenv_order
+        with self.target_microenv_selector.hold_trait_notifications():
+            self.target_microenv_selector.value = ()
+            self.target_microenv_selector.options = self.microenv_order
 
         changed = len(target_idx)
         self._reset_preview_state()
