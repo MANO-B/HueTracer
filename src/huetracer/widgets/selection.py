@@ -94,14 +94,15 @@ def _make_color_map(labels):
 class _BasePlotlySelector:
     """Shared high-performance plotly selector behavior."""
 
-    def __init__(self, sp_adata, merged_df, lib_id, downsample_factor=0.25):
+    def __init__(self, sp_adata, merged_df, lib_id, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
         self.sp_adata_ref = sp_adata
         self.merged = merged_df.copy()
         self.merged_original = merged_df
         self.lib_id = lib_id
         self.downsample_factor = downsample_factor
+        self.img_key = img_key
 
-        raw_img = sp_adata.uns["spatial"][lib_id]["images"]["0.5_mpp_150_buffer"]
+        raw_img = sp_adata.uns["spatial"][lib_id]["images"][img_key]
         self.h, self.w = raw_img.shape[:2]
         self.bg_img = _limit_image_pixels(_downsample_image(raw_img, downsample_factor))
         self.bg_pil = _to_pil_image(self.bg_img)
@@ -109,8 +110,8 @@ class _BasePlotlySelector:
         del raw_img
 
         self.index_values = self.merged.index.to_numpy()
-        self.x = self.merged["x"].to_numpy()
-        self.y = self.merged["y"].to_numpy()
+        self.x = self.merged["x"].to_numpy(dtype=np.float64)
+        self.y = self.merged["y"].to_numpy(dtype=np.float64)
         self.index_to_pos = {idx: i for i, idx in enumerate(self.index_values)}
 
         self.zoom_level = 1.0
@@ -340,11 +341,11 @@ class _BasePlotlySelector:
 class LassoCellSelectorMicroenvironment(_BasePlotlySelector):
     """High-performance microenvironment relabeling widget using Plotly ScatterGL."""
 
-    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25):
+    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
         self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
         self.current_clusters = self.original_clusters.copy()
 
-        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor)
+        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor, img_key=img_key)
 
         self.labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
         self.group_order = [str(v) for v in self.merged["predicted_microenvironment"].dropna().unique()]
@@ -507,11 +508,11 @@ class LassoCellSelectorMicroenvironment(_BasePlotlySelector):
 class LassoCellSelectorCellType(_BasePlotlySelector):
     """High-performance cell-type relabeling widget using Plotly ScatterGL."""
 
-    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25):
+    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
         self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
         self.current_clusters = self.original_clusters.copy()
 
-        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor)
+        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor, img_key=img_key)
 
         self.microenv_labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
         self.celltype_labels = self.merged["predicted_cell_type"].astype(str).to_numpy()
@@ -675,11 +676,11 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
     Supports nearest, centroid, kNN mean, and distance-transform style distances.
     """
 
-    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25):
+    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
         self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
         self.current_clusters = self.original_clusters.copy()
 
-        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor)
+        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor, img_key=img_key)
 
         # Distance mode does not use lasso/box selection; keep navigation-focused controls.
         self.selection_mode.options = [("Pan", "pan")]
@@ -788,15 +789,16 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
         return
 
     def _infer_pixel_size_um(self, default=0.5):
-        # Prefer parsing mpp from image key naming convention: "{mpp}_mpp_..."
-        image_keys = self.sp_adata_ref.uns.get("spatial", {}).get(self.lib_id, {}).get("images", {}).keys()
-        for key in image_keys:
-            key_str = str(key)
-            if "_mpp" in key_str:
-                try:
-                    return float(key_str.split("_mpp", 1)[0])
-                except Exception:
-                    continue
+        # Compute from scalefactors: microns_per_pixel (fullres) / tissue_{img_key}_scalef
+        # merged["x"/"y"] are in img_key image space (coords_raw * tissue_{img_key}_scalef),
+        # so 1 display-image pixel = microns_per_pixel_fullres / scalef um.
+        scalefactors = self.sp_adata_ref.uns.get("spatial", {}).get(self.lib_id, {}).get("scalefactors", {})
+        mpp_fullres = scalefactors.get("microns_per_pixel")
+        if mpp_fullres is not None:
+            scalef_key = f"tissue_{self.img_key}_scalef"
+            scalef = scalefactors.get(scalef_key)
+            if scalef is not None and float(scalef) > 0:
+                return float(mpp_fullres) / float(scalef)
         return float(default)
 
     def _distance_to_display_units(self, arr):
@@ -1144,7 +1146,7 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
         return self
 
 
-def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25):
+def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
     """Launch high-performance microenvironment selector."""
     selector = LassoCellSelectorMicroenvironment(
         sp_adata=sp_adata,
@@ -1152,11 +1154,12 @@ def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsam
         lib_id=lib_id,
         clusters=clusters,
         downsample_factor=downsample_factor,
+        img_key=img_key,
     )
     return selector.run()
 
 
-def lasso_selection_cell_type(sp_adata, merged, lib_id, clusters, downsample_factor=0.25):
+def lasso_selection_cell_type(sp_adata, merged, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
     """Launch high-performance cell type selector."""
     selector = LassoCellSelectorCellType(
         sp_adata=sp_adata,
@@ -1164,11 +1167,12 @@ def lasso_selection_cell_type(sp_adata, merged, lib_id, clusters, downsample_fac
         lib_id=lib_id,
         clusters=clusters,
         downsample_factor=downsample_factor,
+        img_key=img_key,
     )
     return selector.run()
 
 
-def distance_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25):
+def distance_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
     """Launch distance-based microenvironment selector."""
     selector = DistanceMicroenvironmentSelector(
         sp_adata=sp_adata,
@@ -1176,5 +1180,6 @@ def distance_selection_microenvironment(sp_adata, merged, lib_id, clusters, down
         lib_id=lib_id,
         clusters=clusters,
         downsample_factor=downsample_factor,
+        img_key=img_key,
     )
     return selector.run()
