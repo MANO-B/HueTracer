@@ -89,34 +89,24 @@ def update_adata_for_crop(
     print(f"✅ Subset spots: {np.sum(subset_mask)} spots remaining.")
 
     # 3. Reference image cropping
+    # b2c.read_visium stores images under keys "lowres" and "hires" (no "tissue_" prefix)
     scalefactors = adata.uns["spatial"][lib_id]["scalefactors"]
     images_dict = adata.uns["spatial"][lib_id]["images"]
 
-    if "tissue_lowres_image" in images_dict:
-        scale = scalefactors["tissue_lowres_scalef"]
-        lx = int(crop.x * scale)
-        ly = int(crop.y * scale)
-        lw = int(crop.width * scale)
-        lh = int(crop.height * scale)
-
-        orig_img = images_dict["tissue_lowres_image"]
+    for img_key, scalef_key in [("lowres", "tissue_lowres_scalef"), ("hires", "tissue_hires_scalef")]:
+        if img_key not in images_dict:
+            continue
+        scale = scalefactors[scalef_key]
+        ix = int(crop.x * scale)
+        iy = int(crop.y * scale)
+        iw = int(crop.width * scale)
+        ih = int(crop.height * scale)
+        orig_img = images_dict[img_key]
         max_h, max_w = orig_img.shape[:2]
-        ly_end = min(ly + lh, max_h)
-        lx_end = min(lx + lw, max_w)
-        images_dict["tissue_lowres_image"] = orig_img[ly:ly_end, lx:lx_end]
-
-    if "tissue_hires_image" in images_dict:
-        scale = scalefactors["tissue_hires_scalef"]
-        hx = int(crop.x * scale)
-        hy = int(crop.y * scale)
-        hw = int(crop.width * scale)
-        hh = int(crop.height * scale)
-
-        orig_img = images_dict["tissue_hires_image"]
-        max_h, max_w = orig_img.shape[:2]
-        hy_end = min(hy + hh, max_h)
-        hx_end = min(hx + hw, max_w)
-        images_dict["tissue_hires_image"] = orig_img[hy:hy_end, hx:hx_end]
+        iy_end = min(iy + ih, max_h)
+        ix_end = min(ix + iw, max_w)
+        images_dict[img_key] = orig_img[iy:iy_end, ix:ix_end]
+        print(f"✅ Cropped '{img_key}' image: [{iy}:{iy_end}, {ix}:{ix_end}] → {images_dict[img_key].shape[:2]}")
 
     print(
         f"✅ AnnData updated for crop at ({crop.x}, {crop.y}) "
