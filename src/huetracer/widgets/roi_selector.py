@@ -53,14 +53,16 @@ class ROISelectorWidget:
         self,
         adata: Any,
         img_key: Optional[str] = None,
-        basis: str = "spatial_cropped_150_buffer",
+        basis: Optional[str] = None,
     ) -> None:
         """Initialize ROI selector widget.
         
         Args:
             adata: AnnData object with spatial data (obs columns: array_row, array_col)
             img_key: Key for image in adata.uns['spatial']. Auto-detected if None.
-            basis: Basis key for spatial plot (default: 'spatial_cropped_150_buffer')
+            basis: Basis key for spatial plot. Auto-inferred from img_key if None.
+                   bin2cell mpp images use 'spatial_cropped_150_buffer';
+                   'lowres'/'hires' use 'spatial'.
             
         Raises:
             ValueError: If adata is None or missing required spatial coordinates.
@@ -73,12 +75,27 @@ class ROISelectorWidget:
         
         self.adata = adata
         self.img_key = img_key
-        self.basis = basis
         
         # Auto-detect img_key if not provided
         if self.img_key is None:
-            img_keys = [k for k in adata.uns.keys() if "mpp" in k and "buffer" in k]
-            self.img_key = img_keys[0] if img_keys else None
+            try:
+                lib_id = list(adata.uns["spatial"].keys())[0]
+                image_keys = list(adata.uns["spatial"][lib_id]["images"].keys())
+                img_keys = [k for k in image_keys if "mpp" in k and "buffer" in k]
+                self.img_key = img_keys[0] if img_keys else None
+            except (KeyError, IndexError):
+                self.img_key = None
+        
+        # Auto-infer basis from img_key if not explicitly provided
+        if basis is not None:
+            self.basis = basis
+        elif self.img_key is not None and "mpp" in self.img_key and "buffer" in self.img_key:
+            # bin2cell scaled image: find matching obsm key (e.g. 'spatial_cropped_150_buffer')
+            cropped_keys = [k for k in adata.obsm.keys() if "cropped" in k and "buffer" in k]
+            self.basis = cropped_keys[0] if cropped_keys else "spatial_cropped_150_buffer"
+        else:
+            # Standard Visium images (lowres, hires) use the standard spatial basis
+            self.basis = "spatial"
         
         # Get data ranges
         self.min_row = int(adata.obs["array_row"].min())
@@ -229,12 +246,15 @@ class ROISelectorWidget:
 def create_roi_selector_widget(
     adata: Any,
     img_key: Optional[str] = None,
+    basis: Optional[str] = None,
 ) -> ROISelectorWidget:
     """Create and return a ROI selector widget instance.
     
     Args:
         adata: AnnData object with spatial data
         img_key: Optional image key. Auto-detected if None.
+        basis: Optional basis key for spatial plot. Auto-inferred from img_key if None.
+               'lowres'/'hires' → 'spatial'; bin2cell mpp images → 'spatial_cropped_150_buffer'.
         
     Returns:
         ROISelectorWidget: Initialized widget instance
@@ -243,7 +263,7 @@ def create_roi_selector_widget(
         >>> roi_widget = create_roi_selector_widget(sp_adata)
         >>> roi_widget.display()
     """
-    return ROISelectorWidget(adata, img_key=img_key)
+    return ROISelectorWidget(adata, img_key=img_key, basis=basis)
 
 
 class SpatialMaskSelectorWidget:
