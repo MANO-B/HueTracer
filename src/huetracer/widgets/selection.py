@@ -91,16 +91,62 @@ def _make_color_map(labels):
     return cmap
 
 
+def _build_merged_df(sp_adata, lib_id, basis, img_key):
+    """Build a merged DataFrame with pixel-space x/y coordinates from AnnData.
+
+    Coordinates are derived from ``sp_adata.obsm[basis]`` scaled to the display
+    image space of ``img_key`` using the stored ``tissue_{img_key}_scalef``
+    scale factor.  This guarantees that the coordinate system and the
+    pixel-size conversion used by distance widgets are always consistent.
+
+    Parameters
+    ----------
+    sp_adata : AnnData
+        Spatial AnnData object.
+    lib_id : str
+        Spatial library id key in ``sp_adata.uns['spatial']``.
+    basis : str
+        Key in ``sp_adata.obsm`` containing the 2-D spatial coordinates
+        (e.g. ``'spatial_cropped_150_buffer'`` or ``'spatial'``).
+    img_key : str
+        Background image key inside ``sp_adata.uns['spatial'][lib_id]['images']``
+        (e.g. ``'0.5_mpp_150_buffer'``, ``'hires'``, or ``'lowres'``).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame indexed by ``sp_adata.obs_names`` with columns
+        ``x``, ``y``, and any obs columns present in *sp_adata*
+        (``predicted_microenvironment``, ``predicted_cell_type``,
+        ``array_row``, ``array_col``).
+    """
+    scalefactors = sp_adata.uns["spatial"][lib_id].get("scalefactors", {})
+    scalef = float(scalefactors.get(f"tissue_{img_key}_scalef", 1.0))
+    coords = np.asarray(sp_adata.obsm[basis], dtype=np.float64) * scalef
+    df = pd.DataFrame(
+        {"x": coords[:, 0], "y": coords[:, 1]},
+        index=sp_adata.obs_names,
+    )
+    for col in ["predicted_microenvironment", "predicted_cell_type", "array_row", "array_col"]:
+        if col in sp_adata.obs.columns:
+            df[col] = sp_adata.obs[col].values
+    return df
+
+
 class _BasePlotlySelector:
     """Shared high-performance plotly selector behavior."""
 
-    def __init__(self, sp_adata, merged_df, lib_id, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
+    def __init__(self, sp_adata, lib_id, basis="spatial_cropped_150_buffer", downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
         self.sp_adata_ref = sp_adata
-        self.merged = merged_df.copy()
-        self.merged_original = merged_df
         self.lib_id = lib_id
+        self.basis = basis
         self.downsample_factor = downsample_factor
         self.img_key = img_key
+
+        merged_df = _build_merged_df(sp_adata, lib_id, basis, img_key)
+        self.merged = merged_df
+        # Snapshot of original state used by reset operations in subclasses.
+        self.merged_original = merged_df.copy()
 
         raw_img = sp_adata.uns["spatial"][lib_id]["images"][img_key]
         self.h, self.w = raw_img.shape[:2]
@@ -341,11 +387,19 @@ class _BasePlotlySelector:
 class LassoCellSelectorMicroenvironment(_BasePlotlySelector):
     """High-performance microenvironment relabeling widget using Plotly ScatterGL."""
 
-    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
-        self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
+    def __init__(self, sp_adata, lib_id, clusters="predicted_microenvironment", basis="spatial_cropped_150_buffer", img_key="0.5_mpp_150_buffer", downsample_factor=0.25):
+        self.clusters_col = clusters
+        self.original_clusters = _as_aligned_series(sp_adata.obs[clusters], sp_adata.obs_names, "predicted_microenvironment")
         self.current_clusters = self.original_clusters.copy()
 
-        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor, img_key=img_key)
+        super().__init__(sp_adata, lib_id, basis=basis, downsample_factor=downsample_factor, img_key=img_key)
+
+        # Overwrite predicted_microenvironment with the caller-supplied clusters so the
+        # widget reflects the exact labels passed in (which may differ from obs if the
+        # user has not yet called _update_anndata).
+        self.merged["predicted_microenvironment"] = self.original_clusters.values
+        self.merged["predicted_microenvironment"] = self.merged["predicted_microenvironment"].astype("category")
+        self.merged_original["predicted_microenvironment"] = self.original_clusters.values
 
         self.labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
         self.group_order = [str(v) for v in self.merged["predicted_microenvironment"].dropna().unique()]
@@ -469,16 +523,14 @@ class LassoCellSelectorMicroenvironment(_BasePlotlySelector):
             self.status.value = f"<b>Status:</b> Reset failed: {exc}"
 
     def _update_anndata(self, _=None):
-        self.sp_adata_ref.obs["predicted_microenvironment"] = self.merged["predicted_microenvironment"].values
-        self.merged_original["predicted_microenvironment"] = self.merged["predicted_microenvironment"].values
+        self.sp_adata_ref.obs[self.clusters_col] = self.merged["predicted_microenvironment"].values
         self.status.value = "<b>Status:</b> AnnData updated"
 
     def _export_data(self, _=None):
         import __main__ as main
 
         main.updated_merged_export = self.merged.copy()
-        main.updated_clusters_export = self.current_clusters.copy()
-        self.status.value = "<b>Status:</b> Exported to updated_merged_export / updated_clusters_export"
+        self.status.value = "<b>Status:</b> Exported to updated_merged_export"
 
     def run(self):
         controls = widgets.VBox(
@@ -508,11 +560,22 @@ class LassoCellSelectorMicroenvironment(_BasePlotlySelector):
 class LassoCellSelectorCellType(_BasePlotlySelector):
     """High-performance cell-type relabeling widget using Plotly ScatterGL."""
 
-    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
-        self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
+    def __init__(self, sp_adata, lib_id, clusters="predicted_microenvironment", cell_types="predicted_cell_type", basis="spatial_cropped_150_buffer", img_key="0.5_mpp_150_buffer", downsample_factor=0.25):
+        self.clusters_col = clusters
+        self.cell_types_col = cell_types
+        self.original_clusters = _as_aligned_series(sp_adata.obs[clusters], sp_adata.obs_names, "predicted_microenvironment")
         self.current_clusters = self.original_clusters.copy()
 
-        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor, img_key=img_key)
+        super().__init__(sp_adata, lib_id, basis=basis, downsample_factor=downsample_factor, img_key=img_key)
+
+        # Overwrite predicted_microenvironment with caller-supplied clusters.
+        self.merged["predicted_microenvironment"] = self.original_clusters.values
+        self.merged["predicted_microenvironment"] = self.merged["predicted_microenvironment"].astype("category")
+        self.merged_original["predicted_microenvironment"] = self.original_clusters.values
+
+        # Overwrite predicted_cell_type with caller-supplied cell_types column.
+        self.merged["predicted_cell_type"] = sp_adata.obs[cell_types].values
+        self.merged_original["predicted_cell_type"] = sp_adata.obs[cell_types].values
 
         self.microenv_labels = self.merged["predicted_microenvironment"].astype(str).to_numpy()
         self.celltype_labels = self.merged["predicted_cell_type"].astype(str).to_numpy()
@@ -633,16 +696,14 @@ class LassoCellSelectorCellType(_BasePlotlySelector):
         self.status.value = "<b>Status:</b> Reset complete - all labels and groups restored"
 
     def _update_anndata(self, _=None):
-        self.sp_adata_ref.obs["predicted_cell_type"] = self.merged["predicted_cell_type"].values
-        self.merged_original["predicted_cell_type"] = self.merged["predicted_cell_type"].values
+        self.sp_adata_ref.obs[self.cell_types_col] = self.merged["predicted_cell_type"].values
         self.status.value = "<b>Status:</b> AnnData updated"
 
     def _export_data(self, _=None):
         import __main__ as main
 
         main.updated_merged_celltype_export = self.merged.copy()
-        main.updated_clusters_celltype_export = self.current_clusters.copy()
-        self.status.value = "<b>Status:</b> Exported to updated_merged_celltype_export / updated_clusters_celltype_export"
+        self.status.value = "<b>Status:</b> Exported to updated_merged_celltype_export"
 
     def run(self):
         controls = widgets.VBox(
@@ -676,11 +737,22 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
     Supports nearest, centroid, kNN mean, and distance-transform style distances.
     """
 
-    def __init__(self, sp_adata, merged_df, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
-        self.original_clusters = _as_aligned_series(clusters, merged_df.index, "predicted_microenvironment")
+    def __init__(self, sp_adata, lib_id, clusters="predicted_microenvironment", cell_types="predicted_cell_type", basis="spatial_cropped_150_buffer", img_key="0.5_mpp_150_buffer", downsample_factor=0.25):
+        self.clusters_col = clusters
+        self.cell_types_col = cell_types
+        self.original_clusters = _as_aligned_series(sp_adata.obs[clusters], sp_adata.obs_names, "predicted_microenvironment")
         self.current_clusters = self.original_clusters.copy()
 
-        super().__init__(sp_adata, merged_df, lib_id, downsample_factor=downsample_factor, img_key=img_key)
+        super().__init__(sp_adata, lib_id, basis=basis, downsample_factor=downsample_factor, img_key=img_key)
+
+        # Overwrite predicted_microenvironment with caller-supplied clusters.
+        self.merged["predicted_microenvironment"] = self.original_clusters.values
+        self.merged["predicted_microenvironment"] = self.merged["predicted_microenvironment"].astype("category")
+        self.merged_original["predicted_microenvironment"] = self.original_clusters.values
+
+        # Overwrite predicted_cell_type with caller-supplied cell_types column.
+        self.merged["predicted_cell_type"] = sp_adata.obs[cell_types].values
+        self.merged_original["predicted_cell_type"] = sp_adata.obs[cell_types].values
 
         # Distance mode does not use lasso/box selection; keep navigation-focused controls.
         self.selection_mode.options = [("Pan", "pan")]
@@ -1123,16 +1195,72 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
         self.status.value = f"<b>Status:</b> Applied '{new_label}' to {changed} cells ({target_key})"
 
     def _update_anndata(self, _=None):
-        self.sp_adata_ref.obs["predicted_microenvironment"] = self.merged["predicted_microenvironment"].values
-        self.merged_original["predicted_microenvironment"] = self.merged["predicted_microenvironment"].values
+        self.sp_adata_ref.obs[self.clusters_col] = self.merged["predicted_microenvironment"].values
         self.status.value = "<b>Status:</b> AnnData updated"
+
+    def _build_distance_matrix(self, ref_cts):
+        """Build a distance summary DataFrame indexed by CT and ME.
+
+        Parameters
+        ----------
+        ref_cts : list of str
+            Reference cell types used in the distance computation.
+
+        Returns
+        -------
+        pd.DataFrame
+            Rows: ``CT: <ref_ct>__ME: <microenvironment>``
+            Columns: count, min, p10, median, p90, max  (in current display units)
+        """
+        if self._distance_values is None:
+            return None
+
+        dists_display = self._distance_to_display_units(self._distance_values)
+        me_labels = self.microenv_labels
+        ct_label = "+".join(sorted(ref_cts))
+
+        unique_me = sorted(set(me_labels))
+
+        rows = []
+        index = []
+        for me in unique_me:
+            mask = me_labels == me
+            d = dists_display[mask]
+            if len(d) == 0:
+                continue
+            rows.append({
+                "count": int(len(d)),
+                "min": float(np.min(d)),
+                "p10": float(np.percentile(d, 10)),
+                "median": float(np.median(d)),
+                "p90": float(np.percentile(d, 90)),
+                "max": float(np.max(d)),
+            })
+            index.append(f"CT: {ct_label}__ME: {me}")
+
+        df = pd.DataFrame(rows, index=index)
+        return df
 
     def _export_data(self, _=None):
         import __main__ as main
 
         main.updated_merged_distance_export = self.merged.copy()
-        main.updated_clusters_distance_export = self.current_clusters.copy()
-        self.status.value = "<b>Status:</b> Exported to updated_merged_distance_export / updated_clusters_distance_export"
+
+        if self._distance_values is not None:
+            refs = list(self.reference_selector.value)
+            method = self.method_selector.value
+            unit = self._distance_unit_label()
+            ct_label = "+".join(sorted(refs))
+            df_name = f"{ct_label}_ME_{method}_{unit}_matrix"
+            setattr(main, df_name, self._build_distance_matrix(refs))
+            self.status.value = (
+                f"<b>Status:</b> Exported to updated_merged_distance_export, {df_name}"
+            )
+        else:
+            self.status.value = (
+                "<b>Status:</b> Exported to updated_merged_distance_export "
+                "(distance matrix skipped: run 'Compute Distances' first)"
+            )
 
     def run(self):
         controls = widgets.VBox(
@@ -1164,39 +1292,124 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
         return self
 
 
-def lasso_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
-    """Launch high-performance microenvironment selector."""
+def lasso_selection_microenvironment(
+    sp_adata,
+    lib_id,
+    clusters="predicted_microenvironment",
+    basis="spatial_cropped_150_buffer",
+    img_key="0.5_mpp_150_buffer",
+    downsample_factor=0.25,
+):
+    """Launch high-performance microenvironment selector.
+
+    Parameters
+    ----------
+    sp_adata : AnnData
+        Spatial AnnData with ``obsm[basis]`` coordinates and
+        ``uns['spatial'][lib_id]`` image/scalefactor data.
+    lib_id : str
+        Spatial library id.
+    clusters : str
+        Column name in ``sp_adata.obs`` to use as microenvironment labels.
+        Defaults to ``'predicted_microenvironment'``.
+    basis : str
+        Key in ``sp_adata.obsm`` for 2-D coordinates.
+    img_key : str
+        Background image key.
+    downsample_factor : float
+        Background image downsampling factor.
+    """
     selector = LassoCellSelectorMicroenvironment(
         sp_adata=sp_adata,
-        merged_df=merged,
         lib_id=lib_id,
         clusters=clusters,
+        basis=basis,
         downsample_factor=downsample_factor,
         img_key=img_key,
     )
     return selector.run()
 
 
-def lasso_selection_cell_type(sp_adata, merged, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
-    """Launch high-performance cell type selector."""
+def lasso_selection_cell_type(
+    sp_adata,
+    lib_id,
+    clusters="predicted_microenvironment",
+    cell_types="predicted_cell_type",
+    basis="spatial_cropped_150_buffer",
+    img_key="0.5_mpp_150_buffer",
+    downsample_factor=0.25,
+):
+    """Launch high-performance cell type selector.
+
+    Parameters
+    ----------
+    sp_adata : AnnData
+        Spatial AnnData with ``obsm[basis]`` coordinates and
+        ``uns['spatial'][lib_id]`` image/scalefactor data.
+    lib_id : str
+        Spatial library id.
+    clusters : str
+        Column name in ``sp_adata.obs`` to use as microenvironment labels.
+        Defaults to ``'predicted_microenvironment'``.
+    cell_types : str
+        Column name in ``sp_adata.obs`` to use as cell type labels.
+        Defaults to ``'predicted_cell_type'``.
+    basis : str
+        Key in ``sp_adata.obsm`` for 2-D coordinates.
+    img_key : str
+        Background image key.
+    downsample_factor : float
+        Background image downsampling factor.
+    """
     selector = LassoCellSelectorCellType(
         sp_adata=sp_adata,
-        merged_df=merged,
         lib_id=lib_id,
         clusters=clusters,
+        cell_types=cell_types,
+        basis=basis,
         downsample_factor=downsample_factor,
         img_key=img_key,
     )
     return selector.run()
 
 
-def distance_selection_microenvironment(sp_adata, merged, lib_id, clusters, downsample_factor=0.25, img_key="0.5_mpp_150_buffer"):
-    """Launch distance-based microenvironment selector."""
+def distance_selection_microenvironment(
+    sp_adata,
+    lib_id,
+    clusters="predicted_microenvironment",
+    cell_types="predicted_cell_type",
+    basis="spatial_cropped_150_buffer",
+    img_key="0.5_mpp_150_buffer",
+    downsample_factor=0.25,
+):
+    """Launch distance-based microenvironment selector.
+
+    Parameters
+    ----------
+    sp_adata : AnnData
+        Spatial AnnData with ``obsm[basis]`` coordinates and
+        ``uns['spatial'][lib_id]`` image/scalefactor data.
+    lib_id : str
+        Spatial library id.
+    clusters : str
+        Column name in ``sp_adata.obs`` to use as microenvironment labels.
+        Defaults to ``'predicted_microenvironment'``.
+    cell_types : str
+        Column name in ``sp_adata.obs`` to use as cell type labels.
+        Defaults to ``'predicted_cell_type'``.
+    basis : str
+        Key in ``sp_adata.obsm`` for 2-D coordinates.
+    img_key : str
+        Background image key.
+    downsample_factor : float
+        Background image downsampling factor.
+    """
     selector = DistanceMicroenvironmentSelector(
         sp_adata=sp_adata,
-        merged_df=merged,
         lib_id=lib_id,
         clusters=clusters,
+        cell_types=cell_types,
+        basis=basis,
         downsample_factor=downsample_factor,
         img_key=img_key,
     )
