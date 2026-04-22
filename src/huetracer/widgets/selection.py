@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -1251,7 +1253,8 @@ class DistanceMicroenvironmentSelector(_BasePlotlySelector):
             method = self.method_selector.value
             unit = self._distance_unit_label()
             ct_label = "+".join(sorted(refs))
-            df_name = f"{ct_label}_ME_{method}_{unit}_matrix"
+            safe_ct_label = re.sub(r"[^0-9A-Za-z_]+", "_", ct_label).strip("_") or "reference"
+            df_name = f"{safe_ct_label}_ME_{method}_{unit}_matrix"
             setattr(main, df_name, self._build_distance_matrix(refs))
             self.status.value = (
                 f"<b>Status:</b> Exported to updated_merged_distance_export, {df_name}"
