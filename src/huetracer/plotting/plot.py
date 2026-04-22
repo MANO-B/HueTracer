@@ -2627,21 +2627,13 @@ def create_report_plots(
     """
     print("--- Generating plots... ---")
 
-    # Build pixel-space coordinates from AnnData directly (consistent with widgets).
-    scalefactors = sp_adata_microenvironment.uns["spatial"][lib_id].get("scalefactors", {})
-    scalef = float(scalefactors.get(f"tissue_{img_key}_scalef", 1.0))
-    coords = np.asarray(sp_adata_microenvironment.obsm[basis], dtype=np.float64) * scalef
+    # Import locally to avoid adding a module-level plotting -> widgets dependency.
+    from ..widgets.selection import _build_merged_df
+
     hires_img = sp_adata_microenvironment.uns["spatial"][lib_id]["images"][img_key]
     h, w = hires_img.shape[:2]
 
-    merged = pd.DataFrame(
-        {
-            "x": coords[:, 0],
-            "y": coords[:, 1],
-            "predicted_microenvironment": sp_adata_microenvironment.obs["predicted_microenvironment"].values,
-        },
-        index=sp_adata_microenvironment.obs_names,
-    )
+    merged = _build_merged_df(sp_adata_microenvironment, lib_id, basis, img_key)
 
     # === 1. 空間散布図の作成 ===
     group_order = sorted(merged["predicted_microenvironment"].dropna().unique())
