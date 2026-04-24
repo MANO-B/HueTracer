@@ -45,8 +45,8 @@ def _downsample_plotly_background(img, factor):
 def plot_spatial_plotly_fast(
     adata,
     color_col="predicted_microenvironment",
-    basis="spatial_cropped_150_buffer",
     lib_id=None,
+    basis="spatial_cropped_150_buffer",
     img_key="0.5_mpp_150_buffer",
     downsample_img=0.25,
     max_points=250_000,
@@ -64,10 +64,10 @@ def plot_spatial_plotly_fast(
         Spatial AnnData object.
     color_col : str
         Column in ``adata.obs`` used for categorical coloring.
-    basis : str
-        Key in ``adata.obsm`` containing 2D spatial coordinates.
     lib_id : str or None
         Spatial library id. If None, the first available library is used.
+    basis : str
+        Key in ``adata.obsm`` containing 2D spatial coordinates.
     img_key : str
         Background image key inside ``adata.uns['spatial'][lib_id]['images']``.
     downsample_img : float
@@ -153,7 +153,7 @@ def plot_spatial_plotly_fast(
     unique_labels = pd.unique(sampled_labels)
     palette = sns.color_palette("tab20", n_colors=max(20, len(unique_labels)))
     color_map = {
-        label: f"rgb({int(r * 255)},{int(g * 255)},{int(b * 255)})"
+        label: (int(r * 255), int(g * 255), int(b * 255))
         for label, (r, g, b) in zip(unique_labels, palette)
     }
 
@@ -175,6 +175,8 @@ def plot_spatial_plotly_fast(
         label_mask = sampled_labels == label
         if not np.any(label_mask):
             continue
+        r, g, b = color_map[label]
+        rgba_color = f"rgba({r},{g},{b},{point_opacity})"
         fig.add_trace(
             go.Scattergl(
                 x=x[label_mask],
@@ -183,8 +185,7 @@ def plot_spatial_plotly_fast(
                 name=str(label),
                 marker={
                     "size": point_size,
-                    "opacity": point_opacity,
-                    "color": color_map[label],
+                    "color": rgba_color,
                 },
                 hoverinfo="skip",
             )
@@ -2590,36 +2591,50 @@ def plot_volcano_between_microenvironments(
 
 # --- 関数定義 ---
 def create_report_plots(
-    merged: pd.DataFrame,
     sp_adata_microenvironment: ad.AnnData,
-    hires_img: np.ndarray,
-    w: int,
-    h: int,
+    lib_id: str,
     sample_name: str,
-    save_path: str
+    save_path: str,
+    basis: str = "spatial_cropped_150_buffer",
+    img_key: str = "0.5_mpp_150_buffer",
 ) -> None:
     """
-    提供されたデータから空間散布図と構成比率ヒートマップを作成し、保存します。
+    空間散布図と構成比率ヒートマップを作成し、保存します。
+
+    座標と背景画像は ``sp_adata_microenvironment`` から直接取得するため、
+    ノートブック側で ``merged`` / ``hires_img`` / ``w`` / ``h`` を
+    事前に作成する必要はありません。
 
     Parameters
     ----------
-    merged : pd.DataFrame
-        'x', 'y', 'predicted_microenvironment'列を含むDataFrame。
     sp_adata_microenvironment : ad.AnnData
         `.obs`に'predicted_microenvironment'と'predicted_cell_type'を含むAnnDataオブジェクト。
-    hires_img : np.ndarray
-        散布図の背景となる高解像度画像。
-    w : int
-        画像の幅。
-    h : int
-        画像の高さ。
+        ``obsm[basis]`` に2次元座標、``uns['spatial'][lib_id]`` に画像データが必要。
+    lib_id : str
+        ``sp_adata_microenvironment.uns['spatial']`` 内のライブラリIDキー。
     sample_name : str
         保存ファイル名に使用するサンプル名。
     save_path : str
         プロットを保存するディレクトリパス。
+    basis : str
+        ``sp_adata_microenvironment.obsm`` 内の2次元座標キー。
+        デフォルト ``'spatial_cropped_150_buffer'``。
+        標準Visium/Visium HDの場合は ``'spatial'`` を指定してください。
+    img_key : str
+        背景画像キー。``basis='spatial_cropped_150_buffer'`` の場合は
+        ``'0.5_mpp_150_buffer'``、``basis='spatial'`` の場合は ``'hires'`` を
+        指定してください。デフォルト ``'0.5_mpp_150_buffer'``。
     """
     print("--- Generating plots... ---")
-    
+
+    # Import locally to avoid adding a module-level plotting -> widgets dependency.
+    from ..widgets.selection import _build_merged_df
+
+    hires_img = sp_adata_microenvironment.uns["spatial"][lib_id]["images"][img_key]
+    h, w = hires_img.shape[:2]
+
+    merged = _build_merged_df(sp_adata_microenvironment, lib_id, basis, img_key)
+
     # === 1. 空間散布図の作成 ===
     group_order = sorted(merged["predicted_microenvironment"].dropna().unique())
 
