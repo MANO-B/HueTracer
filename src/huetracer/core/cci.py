@@ -20,6 +20,7 @@ import scipy
 import scanpy as sc
 import scipy.sparse as sparse
 from scipy import stats
+from scipy.spatial import cKDTree
 from scipy.stats import beta, binom, chi2_contingency
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -734,7 +735,7 @@ def compute_sender_group_profiles(sp_adata, ligands):
     downstream functions recover the original cells belonging to each group.
     """
     coords = sp_adata.obs[["array_row", "array_col"]].to_numpy(dtype=np.float32)
-    ligand_matrix = safe_toarray(sp_adata[:, ligands].X)
+    ligand_matrix = sp_adata[:, ligands].X
     group_labels = sp_adata.obs["receiver_group"].astype(str).to_numpy()
 
     group_index_map: Dict[str, np.ndarray] = {}
@@ -747,7 +748,7 @@ def compute_sender_group_profiles(sp_adata, ligands):
 
         group_index_map[group_label] = group_idx
         group_celltype, group_microenvironment = split_celltype_microenv_group_label(group_label)
-        mean_expr = ligand_matrix[group_idx].mean(axis=0)
+        mean_expr = np.asarray(ligand_matrix[group_idx].mean(axis=0)).ravel()
         centroid = coords[group_idx].mean(axis=0)
 
         row = {
@@ -764,13 +765,12 @@ def compute_sender_group_profiles(sp_adata, ligands):
     return pd.DataFrame(profile_rows), group_index_map
 
 
-def _compute_group_min_distance(receiver_coords: np.ndarray, sender_coords: np.ndarray) -> float:
+def _compute_group_min_distance(receiver_coords: np.ndarray, sender_tree: cKDTree) -> float:
     """Return the minimum receiver-to-sender cell distance between two groups."""
-    if receiver_coords.size == 0 or sender_coords.size == 0:
+    if receiver_coords.size == 0:
         return np.nan
-    nn = NearestNeighbors(n_neighbors=1, algorithm="ball_tree", n_jobs=-1).fit(sender_coords)
-    distances = nn.kneighbors(receiver_coords, return_distance=True)[0]
-    return float(np.min(distances[:, 0]))
+    distances = sender_tree.query(receiver_coords, k=1)[0]
+    return float(np.min(np.asarray(distances)))
 
 
 def _filter_sender_candidates(
@@ -850,6 +850,10 @@ def build_spatial_sender_group_profiles(
         row["sender_group"]: row
         for _, row in sender_group_profiles.iterrows()
     }
+    sender_group_trees = {
+        sender_group: cKDTree(coords[sender_idx])
+        for sender_group, sender_idx in group_index_map.items()
+    }
 
     sender_profile_map: Dict[str, pd.DataFrame] = {}
     sender_summary_rows: List[Dict[str, Any]] = []
@@ -868,8 +872,7 @@ def build_spatial_sender_group_profiles(
             if not include_receiver_group_sender and sender_group == receiver_group:
                 continue
 
-            sender_coords = coords[sender_idx]
-            min_distance = _compute_group_min_distance(receiver_coords, sender_coords)
+            min_distance = _compute_group_min_distance(receiver_coords, sender_group_trees[sender_group])
             sender_profile = sender_group_profile_map[sender_group]
             centroid_distance = float(
                 np.linalg.norm(
