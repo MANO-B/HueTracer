@@ -41,6 +41,7 @@ dependencies = [
     "scikit-misc",
     "opencv-python",
     "pandas",
+    "openpyxl",
     "zarr",
     "imagecodecs",
     "tifffile",
