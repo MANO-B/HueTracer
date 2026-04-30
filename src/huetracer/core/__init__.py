@@ -19,6 +19,11 @@ from .nucleus_segmentation import (
 from .cci import (
     make_coexp_cc_df, make_non_zero_values, make_positive_values, make_top_values, 
     safe_toarray, add_zscore_layers, construct_microenvironment_data, prepare_microenv_data,
+    MicroenvironmentCCIWorkflow,
+    make_celltype_microenv_group_label, split_celltype_microenv_group_label,
+    prepare_grouped_nichenet_cci_data, compute_receiver_group_degs,
+    build_spatial_sender_group_profiles, calculate_grouped_spatial_nichenet_scores,
+    GroupedNicheNetCCIWorkflow,
     calculate_enhanced_coexpression_coactivity, calculate_enhanced_coexpression_coactivity_cluster,
     comprehensive_interaction_analysis, calculate_cumulative_ligand_coexpression_analysis,
     run_cumulative_analysis_with_clusters
@@ -90,7 +95,11 @@ __all__ = [
     # cci
     'make_coexp_cc_df', 'make_non_zero_values', 'make_positive_values', 'make_top_values',
     'safe_toarray', 'add_zscore_layers', 'construct_microenvironment_data', 
-    'prepare_microenv_data', 'calculate_enhanced_coexpression_coactivity',
+    'prepare_microenv_data', 'MicroenvironmentCCIWorkflow',
+    'make_celltype_microenv_group_label', 'split_celltype_microenv_group_label',
+    'prepare_grouped_nichenet_cci_data', 'compute_receiver_group_degs',
+    'build_spatial_sender_group_profiles', 'calculate_grouped_spatial_nichenet_scores',
+    'GroupedNicheNetCCIWorkflow', 'calculate_enhanced_coexpression_coactivity',
     'calculate_enhanced_coexpression_coactivity_cluster', 'comprehensive_interaction_analysis',
     'calculate_cumulative_ligand_coexpression_analysis', 'run_cumulative_analysis_with_clusters',
     

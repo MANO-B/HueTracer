@@ -1,18 +1,42 @@
-import pandas as pd
+"""Core cell-cell interaction workflows and utilities used by HueTracer.
+
+This module currently contains three layers of functionality:
+
+1. Neighbor-edge CCI preprocessing and scoring (MicroenvironmentCCIWorkflow).
+2. Population-level NicheNet-style CCI built around celltype x microenvironment groups (GroupedNicheNetCCIWorkflow).
+3. Cumulative neighborhood stimulation analyses.
+
+The file is intentionally organized in the same order: generic helpers first,
+workflow-oriented APIs next, and lower-level analysis routines after that.
+"""
+
+from typing import Any, Dict, List, Optional, Tuple
+
+import warnings
+
 import numpy as np
+import pandas as pd
 import scipy
 import scanpy as sc
 import scipy.sparse as sparse
-from sklearn.neighbors import NearestNeighbors
-from tqdm import tqdm
 from scipy import stats
+from scipy.spatial import cKDTree
 from scipy.stats import beta, binom, chi2_contingency
-from statsmodels.stats.multitest import multipletests
-import warnings
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
+from statsmodels.stats.multitest import multipletests
+from tqdm import tqdm
+
+
+# ============================================================================
+# SECTION 1: Helper Utility Functions
+# ============================================================================
+# Simple data transformation utilities for matrix operations and type conversions
 
 def make_coexp_cc_df(ligand_adata, edge_df, role):
+    """Aggregate edge-level ligand activity into a sender/receiver summary table."""
     sender = edge_df.cell1 if role == "sender" else edge_df.cell2
     receiver = edge_df.cell2 if role == "sender" else edge_df.cell1
     coexp_df = pd.DataFrame(
@@ -27,23 +51,32 @@ def make_coexp_cc_df(ligand_adata, edge_df, role):
     return coexp_cc_df
 
 def make_non_zero_values(mat):
+    """Return a boolean mask that marks strictly positive entries in a matrix."""
     top_mat = mat > 0
     return(top_mat)
 
 def make_positive_values(mat):
+    """Clamp negative values to zero in-place and return the modified matrix."""
     mat[mat < 0] = 0
     return(mat)
     
 def make_top_values(mat, top_fraction = 0.1, axis=0):
+    """Return a boolean mask for entries above the requested quantile threshold."""
     top_mat = mat > np.quantile(mat, 1 - top_fraction, axis=axis, keepdims=True)
     return(top_mat)
 
 def safe_toarray(x):
+    """Convert sparse-like matrices to dense arrays while leaving ndarrays unchanged."""
     if type(x) != np.ndarray:
         return x.toarray()
     else:
         return x
 
+
+# ============================================================================
+# SECTION 2: Data Preprocessing Functions
+# ============================================================================
+# Core data preparation: z-score normalization, gene selection, and microenvironment construction
 
 def add_zscore_layers(sp_adata, top_fraction=0.01):
     """
@@ -102,6 +135,7 @@ def add_zscore_layers(sp_adata, top_fraction=0.01):
     sp_adata.layers["zscore_all_celltype"] = zscore_alls
     
 def construct_microenvironment_data(sp_adata, ligands, expr_up_by_ligands, neighbor_cell_numbers=19):
+    """Build edge-level neighborhood tables and ligand-aligned center-cell data."""
     n_cells = len(sp_adata)
     
     # Step 1: Vectorized metadata extraction
@@ -177,7 +211,9 @@ def construct_microenvironment_data(sp_adata, ligands, expr_up_by_ligands, neigh
     
     return edge_df, center_adata, exp_data_ligands
 
+
 def prepare_microenv_data(sp_adata_raw, sp_adata_microenvironment, lt_df_raw, min_frac=0.001, n_top_genes=2000):
+    """Prepare filtered expression and ligand-target matrices for neighbor-edge CCI."""
     print("Starting data preparation...")
     
     # Step 1: Common cells with proper matrix handling
@@ -281,6 +317,996 @@ def prepare_microenv_data(sp_adata_raw, sp_adata_microenvironment, lt_df_raw, mi
     
     return sp_adata, lt_df
 
+
+# ============================================================================
+# SECTION 3: Workflow Orchestration Class
+# ============================================================================
+# Main entry point for microenvironment CCI analysis with clear step-by-step execution
+
+class MicroenvironmentCCIWorkflow:
+    """
+    Orchestrate the microenvironment CCI workflow with readable step logs.
+
+    This class intentionally does not include file loading, so callers can pass
+    pre-loaded AnnData/DataFrame objects from notebooks or scripts.
+    """
+
+    def __init__(
+        self,
+        neighbor_cell_numbers=19,
+        role="receiver",
+        up_rate=1.25,
+        enhancement_threshold=1.25,
+        spontaneous_threshold=0.1,
+        inhibition_threshold=-0.05,
+        min_responses_with_sender=10,
+        min_responses_without_sender=10,
+        verbose=True,
+    ):
+        self.neighbor_cell_numbers = neighbor_cell_numbers
+        self.role = role
+        self.up_rate = up_rate
+        self.enhancement_threshold = enhancement_threshold
+        self.spontaneous_threshold = spontaneous_threshold
+        self.inhibition_threshold = inhibition_threshold
+        self.min_responses_with_sender = min_responses_with_sender
+        self.min_responses_without_sender = min_responses_without_sender
+        self.verbose = verbose
+
+    def _log(self, message):
+        if self.verbose:
+            print(message)
+
+    def preprocess(
+        self,
+        sp_adata_raw,
+        sp_adata_microenvironment,
+        lt_df_raw,
+        min_frac=0.001,
+        n_top_genes=500,
+        zscore_top_fraction=0.05,
+        diff_expr_top_fraction=0.01,
+        ligand_up_top_fraction=0.05,
+    ) -> Dict[str, Any]:
+        """
+        Run preprocessing and build edge-level inputs for CCI analysis.
+        """
+        self._log("[Step 1/5] Prepare filtered spatial and ligand-target matrices")
+        sp_adata, lt_df = prepare_microenv_data(
+            sp_adata_raw=sp_adata_raw,
+            sp_adata_microenvironment=sp_adata_microenvironment,
+            lt_df_raw=lt_df_raw,
+            min_frac=min_frac,
+            n_top_genes=n_top_genes,
+        )
+
+        self._log("[Step 2/5] Create z-score layers used for ligand response detection")
+        sp_adata = sp_adata.copy()
+        if scipy.sparse.issparse(sp_adata.X):
+            sp_adata.X = sp_adata.X.toarray()
+        add_zscore_layers(sp_adata, top_fraction=zscore_top_fraction)
+
+        self._log("[Step 3/5] Identify top differential-expression and ligand-response signals")
+        top_diff_expr_genes = make_top_values(
+            sp_adata.layers["zscore_by_celltype"],
+            axis=1,
+            top_fraction=diff_expr_top_fraction,
+        )
+        expr_up_by_ligands = make_top_values(
+            top_diff_expr_genes @ lt_df,
+            top_fraction=ligand_up_top_fraction,
+        ).to_numpy()
+        ligands = lt_df.columns
+
+        self._log("[Step 4/5] Build neighborhood graph and center-cell feature table")
+        edge_df, center_adata, exp_data = construct_microenvironment_data(
+            sp_adata=sp_adata,
+            ligands=ligands,
+            expr_up_by_ligands=expr_up_by_ligands,
+            neighbor_cell_numbers=self.neighbor_cell_numbers,
+        )
+
+        self._log("[Step 5/5] Preprocessing completed")
+        return {
+            "sp_adata": sp_adata,
+            "lt_df": lt_df,
+            "ligands": ligands,
+            "expr_up_by_ligands": expr_up_by_ligands,
+            "edge_df": edge_df,
+            "center_adata": center_adata,
+            "exp_data": exp_data,
+        }
+
+    def analyze_all(self, prep: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Run all-cluster CCI analysis and print a comprehensive summary.
+        """
+        self._log("[Analysis: all clusters] Calculate enhanced coexpression/coactivity")
+        coexp_cc_df, bargraph_df = calculate_enhanced_coexpression_coactivity(
+            edge_df=prep["edge_df"],
+            center_adata=prep["center_adata"],
+            exp_data=prep["exp_data"],
+            expr_up_by_ligands=prep["expr_up_by_ligands"],
+            sp_adata=prep["sp_adata"],
+            role=self.role,
+            up_rate=self.up_rate,
+        )
+
+        comprehensive_interaction_analysis(
+            coexp_cc_df,
+            enhancement_threshold=self.enhancement_threshold,
+            spontaneous_threshold=self.spontaneous_threshold,
+            inhibition_threshold=self.inhibition_threshold,
+            min_responses_with_sender=self.min_responses_with_sender,
+            min_responses_without_sender=self.min_responses_without_sender,
+        )
+
+        return {
+            "coexp_cc_df": coexp_cc_df,
+            "bargraph_df": bargraph_df,
+        }
+
+    def analyze_cluster(self, prep: Dict[str, Any], cluster_label) -> Dict[str, Any]:
+        """
+        Run cluster-restricted CCI analysis and print a comprehensive summary.
+        """
+        self._log(f"[Analysis: selected clusters] cluster_label={cluster_label}")
+        coexp_cc_df_cluster, bargraph_df_cluster = calculate_enhanced_coexpression_coactivity_cluster(
+            edge_df=prep["edge_df"],
+            center_adata=prep["center_adata"],
+            exp_data=prep["exp_data"],
+            expr_up_by_ligands=prep["expr_up_by_ligands"],
+            sp_adata=prep["sp_adata"],
+            cluster_label=cluster_label,
+            role=self.role,
+            up_rate=self.up_rate,
+        )
+
+        if len(coexp_cc_df_cluster) > 0:
+            comprehensive_interaction_analysis(
+                coexp_cc_df_cluster,
+                enhancement_threshold=self.enhancement_threshold,
+                spontaneous_threshold=self.spontaneous_threshold,
+                inhibition_threshold=self.inhibition_threshold,
+                min_responses_with_sender=self.min_responses_with_sender,
+                min_responses_without_sender=self.min_responses_without_sender,
+            )
+
+        return {
+            "coexp_cc_df_cluster": coexp_cc_df_cluster,
+            "bargraph_df_cluster": bargraph_df_cluster,
+        }
+
+    def run(self, sp_adata_raw, sp_adata_microenvironment, lt_df_raw, cluster_label=None, **preprocess_kwargs):
+        """
+        Convenience method that runs preprocess + all analysis + optional cluster analysis.
+        """
+        prep = self.preprocess(
+            sp_adata_raw=sp_adata_raw,
+            sp_adata_microenvironment=sp_adata_microenvironment,
+            lt_df_raw=lt_df_raw,
+            **preprocess_kwargs,
+        )
+
+        results = {
+            "prep": prep,
+            "all": self.analyze_all(prep),
+        }
+
+        if cluster_label is not None:
+            results["cluster"] = self.analyze_cluster(prep, cluster_label=cluster_label)
+
+        return results
+
+
+# ============================================================================
+# SECTION 3B: Population-Level NicheNet-Style CCI Analysis
+# ============================================================================
+# New workflow that treats receiver/sender as celltype x microenvironment groups.
+
+GROUP_CCI_SEPARATOR = "__"
+SUPPORTED_RECEIVER_LIGAND_SCORE_METHODS = (
+    "weighted_mean",
+    "pearson",
+    "auroc",
+    "aupr",
+)
+SUPPORTED_SENDER_FILTER_MODES = (
+    "adaptive_radius",
+    "distance_threshold",
+    "top_k",
+    "all",
+)
+
+
+def make_celltype_microenv_group_label(celltype, microenvironment) -> str:
+    """Create a stable label for a celltype x microenvironment group."""
+    return f"{str(celltype)}{GROUP_CCI_SEPARATOR}{str(microenvironment)}"
+
+
+def split_celltype_microenv_group_label(group_label: str) -> Tuple[str, str]:
+    """Split a group label back into cell type and microenvironment parts."""
+    parts = str(group_label).split(GROUP_CCI_SEPARATOR, 1)
+    if len(parts) != 2:
+        return str(group_label), "unknown"
+    return parts[0], parts[1]
+
+
+def prepare_grouped_nichenet_cci_data(
+    sp_adata_raw,
+    sp_adata_microenvironment,
+    lt_df_raw,
+    min_frac=0.001,
+    normalize_ligand_target=True,
+):
+    """
+    Prepare aligned expression and ligand-target data for population-level NicheNet CCI.
+
+    The returned AnnData retains both target genes (lt_df rows) and ligand genes
+    (lt_df columns) because the population-level workflow needs both.
+    """
+    common_cells = sp_adata_microenvironment.obs_names.intersection(sp_adata_raw.obs_names)
+    sp_adata = sp_adata_raw[common_cells].copy()
+
+    if scipy.sparse.issparse(sp_adata.X) and isinstance(sp_adata.X, scipy.sparse.coo_matrix):
+        sp_adata.X = sp_adata.X.tocsr()
+
+    if "bin_count" in sp_adata.obs:
+        bin_counts = sp_adata.obs["bin_count"].to_numpy(dtype=float)
+        safe_bin_counts = np.where(bin_counts > 0, bin_counts, 1.0)
+        if scipy.sparse.issparse(sp_adata.X):
+            diag_matrix = scipy.sparse.diags(1.0 / safe_bin_counts, format="csr")
+            sp_adata.X = diag_matrix @ sp_adata.X
+        else:
+            sp_adata.X = sp_adata.X / safe_bin_counts[:, np.newaxis]
+
+    microenv_obs = sp_adata_microenvironment.obs.loc[common_cells]
+    sp_adata.obs["cluster"] = microenv_obs["predicted_microenvironment"].astype(str).values
+    sp_adata.obs["celltype"] = microenv_obs["predicted_cell_type"].astype(str).values
+
+    if "array_row" not in sp_adata.obs.columns or "array_col" not in sp_adata.obs.columns:
+        raise ValueError("sp_adata_raw.obs must contain 'array_row' and 'array_col' for spatial sender selection.")
+
+    sp_adata.obs["receiver_group"] = [
+        make_celltype_microenv_group_label(celltype, cluster)
+        for celltype, cluster in zip(sp_adata.obs["celltype"], sp_adata.obs["cluster"])
+    ]
+
+    min_cells = int(np.ceil(sp_adata.n_obs * min_frac))
+    min_cells = max(min_cells, 1)
+    if scipy.sparse.issparse(sp_adata.X):
+        gene_counts = np.asarray((sp_adata.X > 0).sum(axis=0)).ravel()
+    else:
+        gene_counts = np.asarray((sp_adata.X > 0).sum(axis=0)).ravel()
+
+    valid_genes = sp_adata.var_names[gene_counts >= min_cells]
+    gene_universe = (set(lt_df_raw.index) | set(lt_df_raw.columns)) & set(valid_genes)
+    gene_universe = sorted(gene_universe)
+    if not gene_universe:
+        raise ValueError("No overlapping genes were found between the expression matrix and the ligand-target table.")
+
+    sp_adata = sp_adata[:, gene_universe].copy()
+
+    target_genes = [gene for gene in lt_df_raw.index if gene in sp_adata.var_names]
+    ligand_genes = [gene for gene in lt_df_raw.columns if gene in sp_adata.var_names]
+    if not target_genes:
+        raise ValueError("No NicheNet target genes overlap with the expression matrix.")
+    if not ligand_genes:
+        raise ValueError("No NicheNet ligands overlap with the expression matrix.")
+
+    lt_df = lt_df_raw.loc[target_genes, ligand_genes].copy()
+    if normalize_ligand_target:
+        col_sums = lt_df.sum(axis=0).replace(0, 1.0)
+        lt_df = lt_df.div(col_sums, axis=1)
+
+    return {
+        "sp_adata": sp_adata,
+        "lt_df": lt_df,
+        "target_genes": target_genes,
+        "ligands": ligand_genes,
+    }
+
+
+def compute_receiver_group_degs(
+    sp_adata,
+    lt_df,
+    deg_pval_adj_threshold=0.05,
+    deg_logfc_threshold=0.25,
+    min_cells_per_group=10,
+    deg_method="wilcoxon",
+):
+    """
+    Compute receiver DEGs for each celltype x microenvironment group.
+
+    Each receiver is tested against cells of the same cell type in all other
+    microenvironments.
+    """
+    target_genes = [gene for gene in lt_df.index if gene in sp_adata.var_names]
+    deg_adata = sp_adata[:, target_genes].copy()
+    if scipy.sparse.issparse(deg_adata.X) and isinstance(deg_adata.X, scipy.sparse.coo_matrix):
+        deg_adata.X = deg_adata.X.tocsr()
+    sc.pp.log1p(deg_adata)
+
+    # Pre-convert string obs columns to Categorical so that AnnData.copy() does not
+    # emit "storing '...' as categorical" on every iteration of the inner loop.
+    for _col in ("cluster", "celltype", "receiver_group"):
+        if _col in deg_adata.obs.columns and not hasattr(deg_adata.obs[_col], "cat"):
+            deg_adata.obs[_col] = pd.Categorical(deg_adata.obs[_col].astype(str))
+
+    receiver_deg_map: Dict[str, Dict[str, Any]] = {}
+    summary_rows: List[Dict[str, Any]] = []
+
+    celltypes = deg_adata.obs["celltype"].astype(str)
+    clusters = deg_adata.obs["cluster"].astype(str)
+
+    for celltype in sorted(celltypes.unique()):
+        celltype_mask = celltypes == celltype
+        celltype_adata = deg_adata[celltype_mask].copy()
+        celltype_clusters = celltype_adata.obs["cluster"].astype(str)
+
+        for cluster in sorted(celltype_clusters.unique()):
+            target_mask = celltype_clusters == cluster
+            reference_mask = celltype_clusters != cluster
+
+            target_count = int(np.sum(target_mask))
+            reference_count = int(np.sum(reference_mask))
+            receiver_group = make_celltype_microenv_group_label(celltype, cluster)
+
+            if target_count < min_cells_per_group or reference_count < min_cells_per_group:
+                summary_rows.append({
+                    "receiver_group": receiver_group,
+                    "receiver_celltype": celltype,
+                    "receiver_microenvironment": cluster,
+                    "receiver_cell_count": target_count,
+                    "reference_cell_count": reference_count,
+                    "deg_gene_count": 0,
+                    "status": "skipped_low_cell_count",
+                })
+                continue
+
+            comparison_adata = celltype_adata.copy()
+            comparison_adata.obs["deg_group"] = pd.Categorical(
+                np.where(target_mask.to_numpy(), "target", "other"),
+                categories=["target", "other"],
+            )
+
+            try:
+                sc.tl.rank_genes_groups(
+                    comparison_adata,
+                    groupby="deg_group",
+                    groups=["target"],
+                    reference="other",
+                    method=deg_method,
+                    use_raw=False,
+                    n_genes=comparison_adata.n_vars,
+                )
+                deg_df = sc.get.rank_genes_groups_df(comparison_adata, group="target")
+            except Exception as error:
+                summary_rows.append({
+                    "receiver_group": receiver_group,
+                    "receiver_celltype": celltype,
+                    "receiver_microenvironment": cluster,
+                    "receiver_cell_count": target_count,
+                    "reference_cell_count": reference_count,
+                    "deg_gene_count": 0,
+                    "status": f"deg_failed: {error}",
+                })
+                continue
+
+            deg_df = deg_df.rename(columns={"names": "gene"})
+            deg_df = deg_df[
+                deg_df["gene"].isin(target_genes)
+                & deg_df["pvals_adj"].notna()
+                & deg_df["logfoldchanges"].notna()
+            ].copy()
+            deg_df = deg_df[
+                (deg_df["pvals_adj"] <= deg_pval_adj_threshold)
+                & (deg_df["logfoldchanges"] >= deg_logfc_threshold)
+            ].sort_values(["pvals_adj", "logfoldchanges"], ascending=[True, False])
+
+            receiver_deg_map[receiver_group] = {
+                "receiver_group": receiver_group,
+                "receiver_celltype": celltype,
+                "receiver_microenvironment": cluster,
+                "receiver_cell_count": target_count,
+                "reference_cell_count": reference_count,
+                "target_genes": deg_df["gene"].tolist(),
+                "deg_table": deg_df.reset_index(drop=True),
+            }
+            summary_rows.append({
+                "receiver_group": receiver_group,
+                "receiver_celltype": celltype,
+                "receiver_microenvironment": cluster,
+                "receiver_cell_count": target_count,
+                "reference_cell_count": reference_count,
+                "deg_gene_count": len(deg_df),
+                "status": "ok",
+            })
+
+    return receiver_deg_map, pd.DataFrame(summary_rows)
+
+
+def compute_sender_group_profiles(sp_adata, ligands):
+    """
+    Compute sender-group ligand profiles using all cells that belong to each
+    celltype x microenvironment group.
+
+    Returns both a tabular summary of sender groups and an index map that lets
+    downstream functions recover the original cells belonging to each group.
+    """
+    coords = sp_adata.obs[["array_row", "array_col"]].to_numpy(dtype=np.float32)
+    ligand_matrix = sp_adata[:, ligands].X
+    group_labels = sp_adata.obs["receiver_group"].astype(str).to_numpy()
+
+    group_index_map: Dict[str, np.ndarray] = {}
+    profile_rows: List[Dict[str, Any]] = []
+
+    for group_label in sorted(np.unique(group_labels)):
+        group_idx = np.flatnonzero(group_labels == group_label)
+        if group_idx.size == 0:
+            continue
+
+        group_index_map[group_label] = group_idx
+        group_celltype, group_microenvironment = split_celltype_microenv_group_label(group_label)
+        mean_expr = np.asarray(ligand_matrix[group_idx].mean(axis=0)).ravel()
+        centroid = coords[group_idx].mean(axis=0)
+
+        row = {
+            "sender_group": group_label,
+            "sender_celltype": group_celltype,
+            "sender_microenvironment": group_microenvironment,
+            "sender_group_cell_count": int(group_idx.size),
+            "sender_group_centroid_row": float(centroid[0]),
+            "sender_group_centroid_col": float(centroid[1]),
+        }
+        row.update(dict(zip(ligands, mean_expr)))
+        profile_rows.append(row)
+
+    return pd.DataFrame(profile_rows), group_index_map
+
+
+def _compute_group_min_distance(receiver_coords: np.ndarray, sender_tree: cKDTree) -> float:
+    """Return the minimum receiver-to-sender cell distance between two groups."""
+    if receiver_coords.size == 0:
+        return np.nan
+    distances = sender_tree.query(receiver_coords, k=1)[0]
+    return float(np.min(np.asarray(distances)))
+
+
+def _filter_sender_candidates(
+    candidate_df: pd.DataFrame,
+    sender_filter_mode: str,
+    receiver_radius: float,
+    max_sender_distance: Optional[float],
+    top_k_sender_groups: Optional[int],
+) -> pd.DataFrame:
+    """Select sender groups for one receiver group according to the chosen rule."""
+    if sender_filter_mode == "adaptive_radius":
+        return candidate_df[candidate_df["sender_receiver_min_distance"] <= receiver_radius]
+
+    if sender_filter_mode == "distance_threshold":
+        if max_sender_distance is None:
+            raise ValueError(
+                "max_sender_distance must be provided when sender_filter_mode='distance_threshold'."
+            )
+        return candidate_df[candidate_df["sender_receiver_min_distance"] <= max_sender_distance]
+
+    if sender_filter_mode == "top_k":
+        if top_k_sender_groups is None or int(top_k_sender_groups) <= 0:
+            raise ValueError(
+                "top_k_sender_groups must be a positive integer when sender_filter_mode='top_k'."
+            )
+        return candidate_df.head(int(top_k_sender_groups))
+
+    if sender_filter_mode == "all":
+        return candidate_df
+
+    raise ValueError(
+        "sender_filter_mode must be one of "
+        f"{', '.join(repr(mode) for mode in SUPPORTED_SENDER_FILTER_MODES)}."
+    )
+
+
+def build_spatial_sender_group_profiles(
+    sp_adata,
+    receiver_deg_map,
+    ligands,
+    neighbor_cell_numbers=19,
+    sender_filter_mode="adaptive_radius",
+    sender_distance_scale=1.0,
+    max_sender_distance=None,
+    top_k_sender_groups=None,
+    include_receiver_group_sender=False,
+):
+    """
+    Select sender groups using receiver-group proximity in space and attach the
+    mean ligand expression of the entire sender group.
+
+    sender_filter_mode:
+        adaptive_radius: sender groups whose minimum distance to the receiver
+            group is within the receiver group's local kNN radius.
+        distance_threshold: sender groups within max_sender_distance.
+        top_k: nearest top_k_sender_groups sender groups.
+        all: all sender groups, including distant ones.
+
+    Returns a mapping keyed by receiver_group and a flat summary table that is
+    convenient for tutorial notebooks and downstream exports.
+
+    Notes
+    -----
+    neighbor_cell_numbers is not used to choose per-cell sender neighbors as in
+    the neighbor-edge workflow. Instead, it defines the local spatial scale used to
+    estimate each receiver group's adaptive radius. That radius is then used by
+    sender_filter_mode="adaptive_radius" to keep sender groups that are close
+    to the receiver group as a population.
+    """
+    coords = sp_adata.obs[["array_row", "array_col"]].to_numpy(dtype=np.float32)
+    n_neighbors = min(max(int(neighbor_cell_numbers) + 1, 2), sp_adata.n_obs)
+    global_nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm="ball_tree", n_jobs=-1).fit(coords)
+    global_neighbor_distances = global_nbrs.kneighbors(coords, return_distance=True)[0]
+
+    sender_group_profiles, group_index_map = compute_sender_group_profiles(sp_adata, ligands)
+    sender_group_profile_map = {
+        row["sender_group"]: row
+        for _, row in sender_group_profiles.iterrows()
+    }
+    sender_group_trees = {
+        sender_group: cKDTree(coords[sender_idx])
+        for sender_group, sender_idx in group_index_map.items()
+    }
+
+    sender_profile_map: Dict[str, pd.DataFrame] = {}
+    sender_summary_rows: List[Dict[str, Any]] = []
+
+    for receiver_group, receiver_info in receiver_deg_map.items():
+        receiver_idx = group_index_map.get(receiver_group)
+        if receiver_idx is None or receiver_idx.size == 0:
+            continue
+
+        receiver_coords = coords[receiver_idx]
+        receiver_centroid = receiver_coords.mean(axis=0)
+        receiver_radius = float(np.median(global_neighbor_distances[receiver_idx, -1]) * sender_distance_scale)
+
+        candidate_rows: List[Dict[str, Any]] = []
+        for sender_group, sender_idx in group_index_map.items():
+            if not include_receiver_group_sender and sender_group == receiver_group:
+                continue
+
+            min_distance = _compute_group_min_distance(receiver_coords, sender_group_trees[sender_group])
+            sender_profile = sender_group_profile_map[sender_group]
+            centroid_distance = float(
+                np.linalg.norm(
+                    receiver_centroid - np.array([
+                        sender_profile["sender_group_centroid_row"],
+                        sender_profile["sender_group_centroid_col"],
+                    ])
+                )
+            )
+
+            row = {
+                "receiver_group": receiver_group,
+                "receiver_celltype": receiver_info["receiver_celltype"],
+                "receiver_microenvironment": receiver_info["receiver_microenvironment"],
+                "receiver_group_cell_count": int(receiver_idx.size),
+                "receiver_group_radius": receiver_radius,
+                "sender_group": sender_group,
+                "sender_celltype": sender_profile["sender_celltype"],
+                "sender_microenvironment": sender_profile["sender_microenvironment"],
+                "sender_group_cell_count": int(sender_profile["sender_group_cell_count"]),
+                "sender_receiver_min_distance": min_distance,
+                "sender_receiver_centroid_distance": centroid_distance,
+            }
+            row.update({ligand: float(sender_profile[ligand]) for ligand in ligands})
+            candidate_rows.append(row)
+
+        if not candidate_rows:
+            continue
+
+        candidate_df = pd.DataFrame(candidate_rows).sort_values(
+            ["sender_receiver_min_distance", "sender_receiver_centroid_distance"],
+            ascending=[True, True],
+        )
+
+        sender_rows_df = _filter_sender_candidates(
+            candidate_df=candidate_df,
+            sender_filter_mode=sender_filter_mode,
+            receiver_radius=receiver_radius,
+            max_sender_distance=max_sender_distance,
+            top_k_sender_groups=top_k_sender_groups,
+        )
+
+        if sender_rows_df.empty:
+            continue
+
+        sender_rows: List[Dict[str, Any]] = sender_rows_df.to_dict("records")
+        for sender_row in sender_rows:
+            sender_summary_rows.append({
+                "receiver_group": receiver_group,
+                "sender_group": sender_row["sender_group"],
+                "sender_celltype": sender_row["sender_celltype"],
+                "sender_microenvironment": sender_row["sender_microenvironment"],
+                "sender_group_cell_count": int(sender_row["sender_group_cell_count"]),
+                "sender_receiver_min_distance": float(sender_row["sender_receiver_min_distance"]),
+                "sender_receiver_centroid_distance": float(sender_row["sender_receiver_centroid_distance"]),
+            })
+
+        if sender_rows:
+            sender_profile_map[receiver_group] = pd.DataFrame(sender_rows)
+
+    return sender_profile_map, pd.DataFrame(sender_summary_rows)
+
+
+def _compute_receiver_ligand_score_series(
+    target_genes,
+    lt_df,
+    ligands,
+    score_method="weighted_mean",
+):
+    """
+    Compute receiver-specific ligand prioritization scores.
+
+    weighted_mean:
+        Mean ligand-target weight across receiver target genes.
+    pearson:
+        Pearson correlation between the ligand target profile and a binary
+        receiver target-gene membership vector over the full target universe.
+    auroc:
+        AUROC for ranking receiver target genes above non-target genes.
+    aupr:
+        Average precision for ranking receiver target genes above non-target genes.
+
+    The return value is a ligand-indexed Series so that downstream scoring can
+    align sender expression and receiver prioritization without extra joins.
+    """
+    ligand_target_df = lt_df.loc[:, ligands]
+    valid_target_genes = [gene for gene in target_genes if gene in ligand_target_df.index]
+    if len(valid_target_genes) == 0:
+        return pd.Series(0.0, index=ligands, dtype=float)
+
+    if score_method == "weighted_mean":
+        return ligand_target_df.loc[valid_target_genes].mean(axis=0).astype(float)
+
+    y_true = ligand_target_df.index.isin(valid_target_genes).astype(int)
+    if y_true.sum() == 0 or y_true.sum() == len(y_true):
+        return pd.Series(0.0, index=ligands, dtype=float)
+
+    ligand_matrix = ligand_target_df.to_numpy(dtype=float)
+
+    if score_method == "pearson":
+        y = y_true.astype(float)
+        y_centered = y - y.mean()
+        y_norm = np.linalg.norm(y_centered)
+        if y_norm == 0:
+            return pd.Series(0.0, index=ligands, dtype=float)
+
+        ligand_centered = ligand_matrix - ligand_matrix.mean(axis=0, keepdims=True)
+        ligand_norms = np.linalg.norm(ligand_centered, axis=0)
+        numerators = np.sum(ligand_centered * y_centered[:, np.newaxis], axis=0)
+        denominators = ligand_norms * y_norm
+        corr_scores = np.divide(
+            numerators,
+            denominators,
+            out=np.zeros(ligand_matrix.shape[1], dtype=float),
+            where=denominators > 0,
+        )
+        return pd.Series(corr_scores, index=ligands, dtype=float)
+
+    if score_method not in {"auroc", "aupr"}:
+        raise ValueError(
+            "score_method must be one of "
+            f"{', '.join(repr(method) for method in SUPPORTED_RECEIVER_LIGAND_SCORE_METHODS)}."
+        )
+
+    score_values: List[float] = []
+    positive_rate = float(np.mean(y_true))
+    for ligand_idx in range(ligand_matrix.shape[1]):
+        ligand_scores = ligand_matrix[:, ligand_idx]
+        if np.allclose(ligand_scores, ligand_scores[0]):
+            score_values.append(0.5 if score_method == "auroc" else positive_rate)
+            continue
+
+        if score_method == "auroc":
+            score_values.append(float(roc_auc_score(y_true, ligand_scores)))
+        else:
+            score_values.append(float(average_precision_score(y_true, ligand_scores)))
+
+    return pd.Series(score_values, index=ligands, dtype=float)
+
+
+def calculate_grouped_spatial_nichenet_scores(
+    receiver_deg_map,
+    sender_profile_map,
+    lt_df,
+    ligands,
+    min_target_genes=1,
+    receiver_ligand_score_method="weighted_mean",
+):
+    """
+    Score sender ligands against receiver target genes using population-level mean
+    ligand expression and receiver-specific ligand prioritization scores.
+
+    The function returns two tables:
+    - interactions_df: one row per receiver_group x sender_group x ligand
+    - pair_summary_df: one row per receiver_group x sender_group with top-ligand summaries
+    """
+    result_rows: List[Dict[str, Any]] = []
+    pair_summary_rows: List[Dict[str, Any]] = []
+
+    for receiver_group, receiver_info in receiver_deg_map.items():
+        target_genes = [gene for gene in receiver_info["target_genes"] if gene in lt_df.index]
+        sender_profiles = sender_profile_map.get(receiver_group)
+
+        if len(target_genes) < min_target_genes or sender_profiles is None or sender_profiles.empty:
+            continue
+
+        receiver_ligand_scores = _compute_receiver_ligand_score_series(
+            target_genes=target_genes,
+            lt_df=lt_df,
+            ligands=ligands,
+            score_method=receiver_ligand_score_method,
+        )
+
+        pair_rows = []
+        for _, sender_row in sender_profiles.iterrows():
+            sender_expr = sender_row[ligands].astype(float)
+            activity_scores = sender_expr * receiver_ligand_scores
+
+            ranked_activity_scores = activity_scores.sort_values(ascending=False)
+            top_ligand = ranked_activity_scores.index[0] if len(ranked_activity_scores) > 0 else None
+            top_score = float(ranked_activity_scores.iloc[0]) if len(ranked_activity_scores) > 0 else 0.0
+            top_receiver_score = float(receiver_ligand_scores.loc[top_ligand]) if top_ligand is not None else 0.0
+
+            pair_summary_rows.append({
+                "receiver_group": receiver_group,
+                "receiver_celltype": receiver_info["receiver_celltype"],
+                "receiver_microenvironment": receiver_info["receiver_microenvironment"],
+                "receiver_cell_count": receiver_info["receiver_cell_count"],
+                "sender_group": sender_row["sender_group"],
+                "sender_celltype": sender_row["sender_celltype"],
+                "sender_microenvironment": sender_row["sender_microenvironment"],
+                "sender_group_cell_count": int(sender_row["sender_group_cell_count"]),
+                "sender_receiver_min_distance": float(sender_row["sender_receiver_min_distance"]),
+                "sender_receiver_centroid_distance": float(sender_row["sender_receiver_centroid_distance"]),
+                "target_gene_count": len(target_genes),
+                "receiver_ligand_score_method": receiver_ligand_score_method,
+                "top_ligand": top_ligand,
+                "top_receiver_ligand_score": top_receiver_score,
+                "top_ligand_activity": top_score,
+                "mean_receiver_ligand_score": float(receiver_ligand_scores.mean()),
+                "mean_ligand_activity": float(activity_scores.mean()),
+                "summed_ligand_activity": float(activity_scores.sum()),
+            })
+
+            for ligand in ligands:
+                receiver_ligand_score = float(receiver_ligand_scores.loc[ligand])
+                sender_expression_value = float(sender_expr.loc[ligand])
+                activity_score = float(activity_scores.loc[ligand])
+                pair_rows.append({
+                    "receiver_group": receiver_group,
+                    "receiver_celltype": receiver_info["receiver_celltype"],
+                    "receiver_microenvironment": receiver_info["receiver_microenvironment"],
+                    "receiver_cell_count": receiver_info["receiver_cell_count"],
+                    "sender_group": sender_row["sender_group"],
+                    "sender_celltype": sender_row["sender_celltype"],
+                    "sender_microenvironment": sender_row["sender_microenvironment"],
+                    "sender_group_cell_count": int(sender_row["sender_group_cell_count"]),
+                    "sender_receiver_min_distance": float(sender_row["sender_receiver_min_distance"]),
+                    "sender_receiver_centroid_distance": float(sender_row["sender_receiver_centroid_distance"]),
+                    "ligand": ligand,
+                    "target_gene_count": len(target_genes),
+                    "receiver_ligand_score_method": receiver_ligand_score_method,
+                    "receiver_ligand_score": receiver_ligand_score,
+                    "sender_ligand_mean_expression": sender_expression_value,
+                    "ligand_activity_score": activity_score,
+                })
+
+        result_rows.extend(pair_rows)
+
+    interactions_df = pd.DataFrame(result_rows)
+    if not interactions_df.empty:
+        interactions_df = interactions_df.sort_values(
+            ["receiver_group", "ligand_activity_score", "sender_ligand_mean_expression"],
+            ascending=[True, False, False],
+        ).reset_index(drop=True)
+
+    pair_summary_df = pd.DataFrame(pair_summary_rows)
+    if not pair_summary_df.empty:
+        pair_summary_df = pair_summary_df.sort_values(
+            ["receiver_group", "top_ligand_activity", "summed_ligand_activity"],
+            ascending=[True, False, False],
+        ).reset_index(drop=True)
+
+    return interactions_df, pair_summary_df
+
+
+class GroupedNicheNetCCIWorkflow:
+    """
+    Population-level CCI workflow aligned with the NicheNet receiver/sender concept.
+
+    receiver:
+        celltype x microenvironment group
+    target genes:
+        DEGs for receiver group vs same celltype in other microenvironments
+    sender:
+        celltype x microenvironment groups observed around the receiver in space
+    ligand activity:
+        sender mean ligand expression x receiver-specific ligand prioritization score
+
+    Parameters
+    ----------
+    neighbor_cell_numbers : int, default=19
+        Spatial scale used to estimate each receiver group's local neighborhood
+        radius. In the population-level workflow this is passed to
+        build_spatial_sender_group_profiles and converted into a kNN-based
+        receiver-group radius; it does not mean "use exactly N sender cells"
+        as in the neighbor-edge workflow.
+    deg_pval_adj_threshold : float, default=0.05
+        Maximum adjusted p-value allowed when defining receiver-group target
+        genes.
+    deg_logfc_threshold : float, default=0.25
+        Minimum log fold change required for receiver-group target genes.
+    min_cells_per_group : int, default=10
+        Minimum number of cells required in both the target receiver group and
+        its same-celltype reference population before DEG calculation is run.
+    min_target_genes : int, default=1
+        Minimum number of retained target genes required before ligand scoring
+        is attempted for a receiver group.
+    normalize_ligand_target : bool, default=True
+        Whether to column-normalize the ligand-target matrix during grouped CCI
+        preprocessing.
+    receiver_ligand_score_method : {"weighted_mean", "pearson", "auroc", "aupr"}, default="weighted_mean"
+        Strategy used to rank ligands for each receiver group based on the
+        receiver's target genes.
+    sender_filter_mode : {"adaptive_radius", "distance_threshold", "top_k", "all"}, default="adaptive_radius"
+        Rule used to keep sender groups for each receiver group.
+    sender_distance_scale : float, default=1.0
+        Multiplier applied to the receiver-group adaptive radius when
+        sender_filter_mode="adaptive_radius".
+    max_sender_distance : float or None, default=None
+        Maximum allowed receiver-to-sender distance when
+        sender_filter_mode="distance_threshold".
+    top_k_sender_groups : int or None, default=None
+        Number of sender groups to retain when sender_filter_mode="top_k".
+    include_receiver_group_sender : bool, default=False
+        Whether the receiver group itself may also be treated as a sender group.
+    verbose : bool, default=True
+        Whether to print step-by-step workflow logs.
+
+    Notes
+    -----
+    Execution flow:
+    1. preprocess() aligns the expression matrix and ligand-target matrix.
+    2. compute_receiver_group_degs() defines receiver-specific target genes.
+    3. build_spatial_sender_group_profiles() selects sender groups in space.
+    4. calculate_grouped_spatial_nichenet_scores() computes ligand activities.
+    """
+
+    def __init__(
+        self,
+        neighbor_cell_numbers=19,
+        deg_pval_adj_threshold=0.05,
+        deg_logfc_threshold=0.25,
+        min_cells_per_group=10,
+        min_target_genes=1,
+        normalize_ligand_target=True,
+        receiver_ligand_score_method="weighted_mean",
+        sender_filter_mode="adaptive_radius",
+        sender_distance_scale=1.0,
+        max_sender_distance=None,
+        top_k_sender_groups=None,
+        include_receiver_group_sender=False,
+        verbose=True,
+    ):
+        self.neighbor_cell_numbers = neighbor_cell_numbers
+        self.deg_pval_adj_threshold = deg_pval_adj_threshold
+        self.deg_logfc_threshold = deg_logfc_threshold
+        self.min_cells_per_group = min_cells_per_group
+        self.min_target_genes = min_target_genes
+        self.normalize_ligand_target = normalize_ligand_target
+        self.receiver_ligand_score_method = receiver_ligand_score_method
+        self.sender_filter_mode = sender_filter_mode
+        self.sender_distance_scale = sender_distance_scale
+        self.max_sender_distance = max_sender_distance
+        self.top_k_sender_groups = top_k_sender_groups
+        self.include_receiver_group_sender = include_receiver_group_sender
+        self.verbose = verbose
+
+    def _log(self, message):
+        if self.verbose:
+            print(message)
+
+    def preprocess(self, sp_adata_raw, sp_adata_microenvironment, lt_df_raw, min_frac=0.001):
+        """Prepare receiver DEG tables and spatially filtered sender-group profiles."""
+        self._log("[Step 1/4] Prepare aligned expression matrix with ligand and target genes")
+        prep = prepare_grouped_nichenet_cci_data(
+            sp_adata_raw=sp_adata_raw,
+            sp_adata_microenvironment=sp_adata_microenvironment,
+            lt_df_raw=lt_df_raw,
+            min_frac=min_frac,
+            normalize_ligand_target=self.normalize_ligand_target,
+        )
+
+        self._log("[Step 2/4] Compute receiver-group DEGs within each cell type")
+        receiver_deg_map, receiver_deg_summary = compute_receiver_group_degs(
+            sp_adata=prep["sp_adata"],
+            lt_df=prep["lt_df"],
+            deg_pval_adj_threshold=self.deg_pval_adj_threshold,
+            deg_logfc_threshold=self.deg_logfc_threshold,
+            min_cells_per_group=self.min_cells_per_group,
+        )
+
+        self._log("[Step 3/4] Aggregate spatially proximal sender groups")
+        sender_profile_map, sender_summary = build_spatial_sender_group_profiles(
+            sp_adata=prep["sp_adata"],
+            receiver_deg_map=receiver_deg_map,
+            ligands=prep["ligands"],
+            neighbor_cell_numbers=self.neighbor_cell_numbers,
+            sender_filter_mode=self.sender_filter_mode,
+            sender_distance_scale=self.sender_distance_scale,
+            max_sender_distance=self.max_sender_distance,
+            top_k_sender_groups=self.top_k_sender_groups,
+            include_receiver_group_sender=self.include_receiver_group_sender,
+        )
+
+        self._log("[Step 4/4] Population-level preprocessing completed")
+        prep.update({
+            "receiver_deg_map": receiver_deg_map,
+            "receiver_deg_summary": receiver_deg_summary,
+            "sender_profile_map": sender_profile_map,
+            "sender_summary": sender_summary,
+        })
+        return prep
+
+    def analyze_all(self, prep: Dict[str, Any]) -> Dict[str, Any]:
+        """Score all receiver/sender group pairs produced during preprocessing."""
+        self._log("[Analysis] Calculate ligand activities for all receiver-sender group pairs")
+        interactions_df, pair_summary_df = calculate_grouped_spatial_nichenet_scores(
+            receiver_deg_map=prep["receiver_deg_map"],
+            sender_profile_map=prep["sender_profile_map"],
+            lt_df=prep["lt_df"],
+            ligands=prep["ligands"],
+            min_target_genes=self.min_target_genes,
+            receiver_ligand_score_method=self.receiver_ligand_score_method,
+        )
+        return {
+            "interactions_df": interactions_df,
+            "pair_summary_df": pair_summary_df,
+            "receiver_deg_summary": prep["receiver_deg_summary"],
+            "sender_summary": prep["sender_summary"],
+        }
+
+    def analyze_receiver_group(self, prep: Dict[str, Any], receiver_group: str) -> Dict[str, Any]:
+        """Return receiver-specific slices of the full grouped CCI analysis output."""
+        all_results = self.analyze_all(prep)
+        interactions_df = all_results["interactions_df"]
+        pair_summary_df = all_results["pair_summary_df"]
+
+        return {
+            "interactions_df": interactions_df[interactions_df["receiver_group"] == receiver_group].reset_index(drop=True),
+            "pair_summary_df": pair_summary_df[pair_summary_df["receiver_group"] == receiver_group].reset_index(drop=True),
+            "receiver_deg_summary": all_results["receiver_deg_summary"][all_results["receiver_deg_summary"]["receiver_group"] == receiver_group].reset_index(drop=True),
+            "sender_summary": all_results["sender_summary"][all_results["sender_summary"]["receiver_group"] == receiver_group].reset_index(drop=True),
+        }
+
+    def run(self, sp_adata_raw, sp_adata_microenvironment, lt_df_raw, **preprocess_kwargs):
+        """Convenience wrapper that runs grouped preprocessing and scoring end-to-end."""
+        prep = self.preprocess(
+            sp_adata_raw=sp_adata_raw,
+            sp_adata_microenvironment=sp_adata_microenvironment,
+            lt_df_raw=lt_df_raw,
+            **preprocess_kwargs,
+        )
+        return {
+            "prep": prep,
+            "all": self.analyze_all(prep),
+        }
+
+
+# ============================================================================
+# SECTION 4: Global CCI Analysis (All Clusters)
+# ============================================================================
+# Functions for analyzing cell-cell interactions across all microenvironments
+
 def calculate_enhanced_coexpression_coactivity(edge_df, center_adata, exp_data, expr_up_by_ligands, 
                                                sp_adata, role="receiver", up_rate=1.25):
     """
@@ -380,6 +1406,9 @@ def calculate_enhanced_coexpression_coactivity(edge_df, center_adata, exp_data, 
     print(f"Enhanced: {n_enhanced_significant} significant with baseline consideration")
     
     return coexp_cc_df, bargraph_df
+
+
+# ---- Helper functions for global CCI analysis ----
 
 def fast_calculate_baseline_rates(sp_adata, expr_up_by_ligands, gene_names):
     """
@@ -720,6 +1749,9 @@ def add_fast_multiple_testing_correction(df):
     
     return df
 
+
+# ---- Display functions for global CCI analysis ----
+
 def display_top_interactions_by_cell_type(coexp_cc_df, enhancement_threshold=1.25, top_n=10, 
                                           min_responses_with_sender=5, min_responses_without_sender=5):
     """
@@ -941,6 +1973,11 @@ def comprehensive_interaction_analysis(coexp_cc_df, enhancement_threshold=0.02, 
                                min_responses_without_sender=min_responses_without_sender)
 
 
+# ============================================================================
+# SECTION 5: Cluster-Specific CCI Analysis
+# ============================================================================
+# Functions for analyzing cell-cell interactions within specific microenvironment clusters
+
 def calculate_enhanced_coexpression_coactivity_cluster(edge_df, center_adata, exp_data, expr_up_by_ligands, 
                                                      sp_adata, cluster_label, role="receiver", up_rate=1.25):
     """
@@ -1076,6 +2113,9 @@ def calculate_enhanced_coexpression_coactivity_cluster(edge_df, center_adata, ex
     print(f"Baseline: {n_baseline_significant} significant vs cluster baseline")
     
     return coexp_cc_df, bargraph_df
+
+
+# ---- Helper functions for cluster-specific CCI analysis ----
 
 def fast_calculate_cluster_baseline_rates(sp_adata, expr_up_by_ligands, gene_names, cluster_label):
     """
@@ -1483,50 +2523,11 @@ def compute_detailed_cluster_analysis(celltype_cluster_data):
     
     return detailed_stats
 
-def compute_detailed_cluster_analysis(celltype_cluster_data):
-    """
-    Detailed analysis of cell type x cluster x ligand
-    """
-    
-    detailed_stats = celltype_cluster_data.copy()
-    
-    # Calculation of conditional probability
-    detailed_stats['response_rate_with_high_stimulation'] = np.divide(
-        detailed_stats['interaction_positive'],
-        detailed_stats['high_stimulation_environment'],
-        out=np.zeros_like(detailed_stats['interaction_positive'], dtype=float),
-        where=detailed_stats['high_stimulation_environment'] > 0
-    )
-    
-    # Calculation of response rate in low stimulation environment
-    detailed_stats['low_stimulation_responses'] = (
-        detailed_stats['center_cell_response'] - detailed_stats['interaction_positive']
-    )
-    detailed_stats['low_stimulation_opportunities'] = (
-        detailed_stats['total_observations'] - detailed_stats['high_stimulation_environment']
-    )
-    
-    detailed_stats['response_rate_with_low_stimulation'] = np.divide(
-        detailed_stats['low_stimulation_responses'],
-        detailed_stats['low_stimulation_opportunities'],
-        out=np.zeros_like(detailed_stats['low_stimulation_responses'], dtype=float),
-        where=detailed_stats['low_stimulation_opportunities'] > 0
-    )
-    
-    # Stimulation enhancement effect
-    detailed_stats['stimulation_enhancement'] = (
-        detailed_stats['response_rate_with_high_stimulation'] - 
-        detailed_stats['response_rate_with_low_stimulation']
-    )
-    
-    # Simplified statistical test (fast version for large data)
-    detailed_stats['is_significant'] = (
-        (detailed_stats['high_stimulation_environment'] >= 5) &
-        (detailed_stats['low_stimulation_opportunities'] >= 5) &
-        (detailed_stats['stimulation_enhancement'] > 0.01)  # 1% or more enhancement effect
-    )
-    
-    return detailed_stats
+
+# ============================================================================
+# SECTION 6: Cumulative Ligand Stimulation Analysis
+# ============================================================================
+# Functions for analyzing cell-cell interactions based on cumulative neighbor expression
 
 def calculate_cumulative_ligand_coexpression_analysis(edge_df, center_adata, exp_data, expr_up_by_ligands, 
                                                       sp_adata, neighbor_cell_numbers=19, 
@@ -1954,6 +2955,9 @@ def compute_cumulative_baseline_comparison(results_df, sp_adata, expr_up_by_liga
     })
     
     return baseline_df
+
+
+# ---- Display and summary functions for cumulative analysis ----
 
 def create_cumulative_bargraph_data(neighborhood_data, cumulative_expr, center_responses, gene_names):
     """
